@@ -262,6 +262,34 @@ body {
   justify-content: space-between;
 }
 
+
+.meta-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+}
+
+.meta-field {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 140px;
+  gap: 4px;
+}
+
+.meta-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.meta-field select {
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(75, 85, 99, 0.7);
+  background: rgba(15, 23, 42, 0.95);
+  color: var(--text-primary);
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
 .progress-card {
   grid-column: 1 / -1;
 }

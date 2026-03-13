@@ -27,6 +27,10 @@ const STEP_ROTATE_MS = 4000;
 const App: React.FC = () => {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState<string>('');
+  const [language, setLanguage] = useState<string>(''); // required
+  const [curriculum, setCurriculum] = useState<string>(''); // optional
+  const [classLevel, setClassLevel] = useState<string>(''); // optional
+  const [subject, setSubject] = useState<string>(''); // optional
   const [status, setStatus] = useState<ExecutionStatus>('idle');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [runCount, setRunCount] = useState(0);
@@ -143,16 +147,33 @@ const App: React.FC = () => {
     ]);
   };
 
-  const handleRun = async () => {
-    if (status === 'running') return;
+  const runAutomation = async (file: File | null, promptValue: string) => {
+    if (!language) {
+      const fallback: RunResult = {
+        ok: false,
+        httpStatus: 0,
+        data: null,
+        errorMessage: 'Please select a language before starting.'
+      };
+      appendLog(fallback, 'error');
+      return;
+    }
 
     resetProgress();
-    setStatus('running');
     setRunCount((prev) => prev + 1);
-    setStepState(PIPELINE_STEPS[0].id, 'running');
 
     try {
-      const result = await triggerAutomation({ pdfFile, prompt });
+      setStatus('running');
+      setStepState(PIPELINE_STEPS[0].id, 'running');
+
+      const result = await triggerAutomation({
+        pdfFile: file,
+        prompt: promptValue,
+        language,
+        curriculum,
+        classLevel,
+        subject
+      });
 
       if (rotateRef.current) {
         clearInterval(rotateRef.current);
@@ -192,6 +213,16 @@ const App: React.FC = () => {
     }
   };
 
+  const handleRun = async () => {
+    if (status === 'running') return;
+    await runAutomation(pdfFile, prompt);
+  };
+
+  const handleQuickStart = async () => {
+    if (status === 'running') return;
+    await runAutomation(null, '');
+  };
+
   return (
     <div className="app-root">
       <header className="app-header">
@@ -216,7 +247,7 @@ const App: React.FC = () => {
         <section className="card">
           <h2>1. PDF Upload</h2>
           <p className="card-text">
-            Choose the chapter PDF. It will be sent to n8n and can be uploaded to your Drive folder.
+            Choose the chapter PDF. It will be sent to n8n and can be uploaded or processed there.
           </p>
           <label className="file-drop">
             <input
@@ -256,10 +287,77 @@ const App: React.FC = () => {
           />
         </section>
 
-        <section className="card action-card">
-          <h2>3. Run Automation</h2>
+        <section className="card">
+          <h2>3. Metadata</h2>
           <p className="card-text">
-            Start the full pipeline: extract PDF → AI lesson → topics → skyboxes → Firebase & Sheets.
+            Choose the language, class, and subject for this lesson. These values are sent to n8n
+            along with the PDF and prompt.
+          </p>
+          <div className="meta-grid">
+            <label className="meta-field">
+              <span className="meta-label">Language</span>
+              <select
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+                disabled={status === 'running'}
+              >
+                <option value="">Select language…</option>
+                <option value="en">English</option>
+                <option value="hi">Hindi</option>
+              </select>
+            </label>
+            <label className="meta-field">
+              <span className="meta-label">Curriculum</span>
+              <select
+                value={curriculum}
+                onChange={(e) => setCurriculum(e.target.value)}
+                disabled={status === 'running'}
+              >
+                <option value="">Not set (optional)</option>
+                <option value="CBSE">CBSE</option>
+                <option value="RBSE">RBSE</option>
+              </select>
+            </label>
+            <label className="meta-field">
+              <span className="meta-label">Class</span>
+              <select
+                value={classLevel}
+                onChange={(e) => setClassLevel(e.target.value)}
+                disabled={status === 'running'}
+              >
+                <option value="">Not set (optional)</option>
+                <option value="1">Class 1</option>
+                <option value="2">Class 2</option>
+                <option value="3">Class 3</option>
+                <option value="4">Class 4</option>
+                <option value="5">Class 5</option>
+                <option value="6">Class 6</option>
+                <option value="7">Class 7</option>
+                <option value="8">Class 8</option>
+              </select>
+            </label>
+            <label className="meta-field">
+              <span className="meta-label">Subject</span>
+              <select
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                disabled={status === 'running'}
+              >
+                <option value="">Not set (optional)</option>
+                <option value="EVS">EVS</option>
+                <option value="English">English</option>
+                <option value="Maths">Maths</option>
+                <option value="Science">Science</option>
+                <option value="Social Science">Social Science</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section className="card action-card">
+          <h2>Start with current inputs</h2>
+          <p className="card-text">
+            Use the selected PDF and prompt (if any) and run the full pipeline.
           </p>
           <button
             type="button"
@@ -267,7 +365,7 @@ const App: React.FC = () => {
             onClick={handleRun}
             disabled={status === 'running' || !n8nConfigured}
           >
-            {status === 'running' ? 'Running…' : 'Start Automation'}
+            {status === 'running' ? 'Running…' : 'Start'}
           </button>
           {!n8nConfigured && (
             <p className="warning">
@@ -277,6 +375,21 @@ const App: React.FC = () => {
           <p className="hint">
             Runs this session: <strong>{runCount}</strong>
           </p>
+        </section>
+
+        <section className="card action-card">
+          <h2>Quick start (no inputs)</h2>
+          <p className="card-text">
+            Start the workflow immediately without sending any PDF or prompt. Useful for testing.
+          </p>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={handleQuickStart}
+            disabled={status === 'running' || !n8nConfigured}
+          >
+            {status === 'running' ? 'Running…' : 'Quick Start'}
+          </button>
         </section>
 
         <section className="card progress-card">

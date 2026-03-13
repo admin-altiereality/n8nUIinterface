@@ -51,6 +51,10 @@ if (!WEBHOOK_URL) {
 export async function triggerAutomation(params: {
   pdfFile: File | null;
   prompt: string;
+  language: string;
+  curriculum: string;
+  classLevel: string;
+  subject: string;
 }): Promise<RunResult> {
   if (!WEBHOOK_URL) {
     return {
@@ -66,6 +70,10 @@ export async function triggerAutomation(params: {
     formData.append('file', params.pdfFile, params.pdfFile.name);
   }
   formData.append('prompt', params.prompt);
+  formData.append('language', params.language);
+  formData.append('curriculum', params.curriculum);
+  formData.append('class', params.classLevel);
+  formData.append('subject', params.subject);
 
   const response = await fetch(WEBHOOK_URL, {
     method: 'POST',
