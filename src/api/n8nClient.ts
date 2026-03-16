@@ -34,6 +34,15 @@ export interface N8nExecution {
   };
 }
 
+export interface N8nExecutionListItem {
+  id: string;
+  startedAt: string;
+  stoppedAt?: string;
+  status: 'running' | 'success' | 'error' | 'waiting';
+  mode?: string;
+  workflowId?: string;
+}
+
 const WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL as string | undefined;
 const N8N_API_URL = import.meta.env.VITE_N8N_API_URL as string | undefined;
 const N8N_API_KEY = import.meta.env.VITE_N8N_API_KEY as string | undefined;
@@ -111,13 +120,42 @@ export async function triggerAutomation(params: {
 export async function getExecutionStatus(executionId: string): Promise<N8nExecution | null> {
   if (!N8N_API_URL || !N8N_API_KEY) return null;
   const base = N8N_API_URL.replace(/\/$/, '');
-  const url = `${base}/api/v1/executions/${executionId}`;
+  const url = `${base}/api/v1/executions/${encodeURIComponent(executionId)}`;
   try {
     const res = await fetch(url, {
-      headers: { 'X-N8N-API-KEY': N8N_API_KEY }
+      headers: {
+        'X-N8N-API-KEY': N8N_API_KEY
+      }
     });
     if (!res.ok) return null;
     return (await res.json()) as N8nExecution;
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch a list of recent n8n executions (via backend proxy). */
+export async function listExecutions(
+  limit = 10
+): Promise<N8nExecutionListItem[] | null> {
+  if (!N8N_API_URL || !N8N_API_KEY) return null;
+  const base = N8N_API_URL.replace(/\/$/, '');
+  const url = `${base}/api/v1/executions?take=${encodeURIComponent(limit)}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'X-N8N-API-KEY': N8N_API_KEY
+      }
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { data?: N8nExecutionListItem[] } | N8nExecutionListItem[];
+    if (Array.isArray(json)) {
+      return json;
+    }
+    if (json && Array.isArray(json.data)) {
+      return json.data;
+    }
+    return null;
   } catch {
     return null;
   }

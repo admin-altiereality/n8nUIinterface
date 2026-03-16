@@ -7,7 +7,9 @@ import {
   PIPELINE_STEPS,
   PipelineStepId,
   RunResult,
-  triggerAutomation
+  triggerAutomation,
+  listExecutions,
+  N8nExecutionListItem
 } from './api/n8nClient';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
@@ -24,6 +26,15 @@ interface LogEntry {
   httpStatus: number;
   message: string;
   raw?: unknown;
+}
+
+type NodeLogStatus = 'pending' | 'running' | 'done' | 'error';
+
+interface NodeLogEntry {
+  name: string;
+  status: NodeLogStatus;
+  startedAt?: string;
+  durationMs?: number;
 }
 
 const POLL_INTERVAL_MS = 2500;
@@ -57,6 +68,8 @@ const App: React.FC = () => {
   const [formError, setFormError] = useState<string | null>(null);
   const [currentNodeName, setCurrentNodeName] = useState<string | null>(null);
   const [dynamicNodes, setDynamicNodes] = useState<string[]>([]);
+  const [nodeLogs, setNodeLogs] = useState<NodeLogEntry[]>([]);
+  const [recentExecutions, setRecentExecutions] = useState<N8nExecutionListItem[]>([]);
   const rotateRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -91,6 +104,16 @@ const App: React.FC = () => {
     []
   );
 
+  useEffect(() => {
+    const loadExecutions = async () => {
+      const list = await listExecutions(10);
+      if (list && Array.isArray(list)) {
+        setRecentExecutions(list);
+      }
+    };
+    loadExecutions();
+  }, []);
+
   const resetProgress = useCallback(() => {
     setStepStates(
       PIPELINE_STEPS.reduce((acc, s) => ({ ...acc, [s.id]: 'pending' }), {} as Record<PipelineStepId, StepState>)
@@ -99,6 +122,7 @@ const App: React.FC = () => {
     setExecutionId(null);
     setCurrentNodeName(null);
     setDynamicNodes([]);
+    setNodeLogs([]);
   }, []);
 
   const setStepState = useCallback((stepId: PipelineStepId, state: StepState) => {
@@ -168,7 +192,7 @@ const App: React.FC = () => {
         // Build a sorted list of node names based on their first start time
         const timeline: Array<{ name: string; firstStart: number }> = [];
         Object.entries(runData).forEach(([nodeName, runs]) => {
-          const typedRuns = runs as Array<{ startTime: number }>;
+          const typedRuns = runs as Array<{ startTime: number; executionTime?: number }>;
           if (!typedRuns.length) return;
           const first = typedRuns[0];
           if (!first) return;
@@ -182,7 +206,7 @@ const App: React.FC = () => {
         let latestStart = -Infinity;
 
         Object.entries(runData).forEach(([nodeName, runs]) => {
-          const typedRuns = runs as Array<{ startTime: number }>;
+          const typedRuns = runs as Array<{ startTime: number; executionTime?: number }>;
           const last = typedRuns[typedRuns.length - 1];
           if (!last) return;
           if (last.startTime > latestStart) {
@@ -190,6 +214,35 @@ const App: React.FC = () => {
             latestNode = nodeName;
           }
         });
+
+        const nodeLogList: NodeLogEntry[] = [];
+        orderedNames.forEach((name) => {
+          const runs = runData[name] as Array<{ startTime: number; executionTime?: number }>;
+          const last = runs && runs[runs.length - 1];
+          const startedAt =
+            last && typeof last.startTime === 'number'
+              ? new Date(last.startTime).toLocaleString()
+              : undefined;
+          const durationMs =
+            last && typeof last.executionTime === 'number'
+              ? Math.round(last.executionTime)
+              : undefined;
+
+          let status: NodeLogStatus = 'done';
+          if (latestNode && name === latestNode && exec.status === 'running') {
+            status = 'running';
+          } else if (exec.status === 'error' && latestNode && name === latestNode) {
+            status = 'error';
+          }
+
+          nodeLogList.push({
+            name,
+            status,
+            startedAt,
+            durationMs
+          });
+        });
+        setNodeLogs(nodeLogList);
 
         if (latestNode) {
           setCurrentNodeName(latestNode);
@@ -287,7 +340,24 @@ const App: React.FC = () => {
         pollRef.current = null;
       }
 
-      if (result.executionId) setExecutionId(result.executionId);
+      if (result.executionId) {
+        // Happy path: use the execution id provided by the workflow webhook.
+        setExecutionId(result.executionId);
+      } else if (canPollExecution) {
+        // If the workflow does not return an executionId, we cannot reliably track
+        // node-by-node progress. Log a synthetic error entry so this is visible in the UI.
+        appendLog(
+          {
+            ok: false,
+            httpStatus: result.httpStatus,
+            data: {
+              message:
+                'Workflow did not return executionId. Update the n8n workflow response to include {{$execution.id}} so the app can show per-node logs.'
+            }
+          } as RunResult,
+          'error'
+        );
+      }
 
       if (result.ok) {
         appendLog(result, 'success');
@@ -341,6 +411,23 @@ const App: React.FC = () => {
     setStatus('idle');
     setExecutionId(null);
   };
+
+  const totalSteps = dynamicNodes.length || PIPELINE_STEPS.length;
+  const inferredIndexFromNode =
+    currentNodeName && dynamicNodes.length ? dynamicNodes.indexOf(currentNodeName) : -1;
+  const activeIndex =
+    status === 'success'
+      ? totalSteps - 1
+      : inferredIndexFromNode >= 0
+      ? inferredIndexFromNode
+      : currentStepIndex;
+
+  const progressPercent =
+    status === 'idle' || totalSteps === 0
+      ? 0
+      : status === 'success'
+      ? 100
+      : Math.max(0, Math.min(100, Math.round(((activeIndex + 1) / totalSteps) * 100)));
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50">
@@ -596,6 +683,18 @@ const App: React.FC = () => {
               )}
             </CardHeader>
             <CardContent>
+              <div className="mb-3">
+                <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
+                  <span>Overall progress</span>
+                  <span className="font-medium text-slate-100">{progressPercent}%</span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800/90">
+                  <div
+                    className="h-full rounded-full bg-sky-400 transition-[width] duration-300 ease-out"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+              </div>
               <ol className="flex flex-wrap gap-2 text-[11px] text-slate-300">
                 {(dynamicNodes.length ? dynamicNodes : PIPELINE_STEPS.map((s) => s.label)).map(
                   (name, index) => {
@@ -645,10 +744,94 @@ const App: React.FC = () => {
             <CardHeader>
               <CardTitle>Execution & error logs</CardTitle>
               <CardDescription>
-                Responses and errors from n8n nodes (including error handlers and WhatsApp sends).
+                Responses and errors from n8n. When available, node-by-node workflow logs are shown.
               </CardDescription>
             </CardHeader>
             <CardContent>
+              {recentExecutions.length > 0 && (
+                <div className="mb-4 space-y-1.5 text-[11px]">
+                  <p className="text-slate-400">Recent executions:</p>
+                  <ul className="space-y-1">
+                    {recentExecutions.map((exec) => (
+                      <li
+                        key={exec.id}
+                        className="flex items-center justify-between gap-2 rounded-lg border border-slate-700/80 bg-slate-950/60 px-2.5 py-1.5"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[10px] text-slate-300">
+                              {exec.id}
+                            </span>
+                            <span className="text-[10px] text-slate-500">
+                              {new Date(exec.startedAt).toLocaleString()}
+                            </span>
+                          </div>
+                          {exec.stoppedAt && (
+                            <span className="text-[10px] text-slate-500">
+                              Finished: {new Date(exec.stoppedAt).toLocaleString()}
+                            </span>
+                          )}
+                        </div>
+                        <span
+                          className={`inline-flex h-5 items-center rounded-full px-2 text-[9px] font-semibold uppercase ${
+                            exec.status === 'success'
+                              ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/60'
+                              : exec.status === 'running'
+                              ? 'bg-sky-500/15 text-sky-300 border border-sky-400/60'
+                              : exec.status === 'error'
+                              ? 'bg-rose-500/15 text-rose-200 border border-rose-500/60'
+                              : 'bg-slate-600/20 text-slate-200 border border-slate-500/60'
+                          }`}
+                        >
+                          {exec.status}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {nodeLogs.length > 0 && (
+                <div className="mb-3 space-y-1.5 text-[11px]">
+                  <p className="text-slate-400">Current execution (node-by-node):</p>
+                  <ul className="space-y-1.5">
+                    {nodeLogs.map((node) => (
+                      <li
+                        key={node.name}
+                        className="flex items-start justify-between gap-2 rounded-lg border border-slate-700/80 bg-slate-950/60 px-2.5 py-1.5"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-slate-400">
+                              {node.startedAt ?? '—'}
+                            </span>
+                            {typeof node.durationMs === 'number' && (
+                              <span className="text-[10px] text-slate-500">
+                                • {Math.round(node.durationMs)} ms
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-slate-50">{node.name}</span>
+                          </div>
+                        </div>
+                        <span
+                          className={`mt-0.5 inline-flex h-5 items-center rounded-full px-2 text-[9px] font-semibold uppercase ${
+                            node.status === 'running'
+                              ? 'bg-sky-500/15 text-sky-300 border border-sky-400/60'
+                              : node.status === 'error'
+                              ? 'bg-rose-500/15 text-rose-200 border border-rose-500/60'
+                              : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/50'
+                          }`}
+                        >
+                          {node.status}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {logs.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-slate-700/80 bg-slate-950/50 px-4 py-3 text-[11px] text-slate-400">
                   No runs yet. Trigger the automation to see logs here.
