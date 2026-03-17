@@ -41,7 +41,7 @@ app.get('/n8n/executions/:id', async (req, res) => {
 
   const { id } = req.params;
   const base = N8N_API_URL.replace(/\/$/, '');
-  const url = `${base}/api/v1/executions/${encodeURIComponent(id)}`;
+  const url = `${base}/api/v1/executions/${encodeURIComponent(id)}?includeData=true`;
 
   try {
     const apiRes = await fetch(url, {
@@ -75,7 +75,7 @@ app.get('/n8n/executions', async (req, res) => {
   const take = Number.isFinite(limit) && limit > 0 && limit <= 100 ? limit : 10;
 
   const base = N8N_API_URL.replace(/\/$/, '');
-  const url = `${base}/api/v1/executions?take=${encodeURIComponent(take)}`;
+  const url = `${base}/api/v1/executions?limit=${encodeURIComponent(take)}`;
 
   try {
     const apiRes = await fetch(url, {

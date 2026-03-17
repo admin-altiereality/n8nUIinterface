@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   canPollExecution,
   ExecutionStatus,
+  fetchExecutionDetail,
   getExecutionStatus,
   N8nExecution,
   PIPELINE_STEPS,
@@ -16,6 +17,7 @@ import { Button } from './components/ui/button';
 import { Textarea } from './components/ui/textarea';
 import { Label } from './components/ui/label';
 import { Select } from './components/ui/select';
+import { JsonView } from './components/JsonView';
 
 type StepState = 'pending' | 'running' | 'done' | 'error';
 
@@ -70,8 +72,13 @@ const App: React.FC = () => {
   const [dynamicNodes, setDynamicNodes] = useState<string[]>([]);
   const [nodeLogs, setNodeLogs] = useState<NodeLogEntry[]>([]);
   const [recentExecutions, setRecentExecutions] = useState<N8nExecutionListItem[]>([]);
+  const [selectedExecId, setSelectedExecId] = useState<string | null>(null);
+  const [executionDetails, setExecutionDetails] = useState<Record<string, N8nExecution>>({});
+  const [loadingExecId, setLoadingExecId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const rotateRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);  
+  const execRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const extractErrorMessage = useCallback((data: unknown): string | null => {
     if (!data || typeof data !== 'object') return null;
@@ -106,13 +113,35 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const loadExecutions = async () => {
-      const list = await listExecutions(10);
+      const list = await listExecutions(20);
       if (list && Array.isArray(list)) {
         setRecentExecutions(list);
       }
     };
     loadExecutions();
+    // Auto-refresh every 30 s
+    execRefreshRef.current = setInterval(loadExecutions, 30_000);
+    return () => {
+      if (execRefreshRef.current) clearInterval(execRefreshRef.current);
+    };
   }, []);
+
+  const handleSelectExecution = useCallback(async (id: string) => {
+    if (selectedExecId === id) {
+      setSelectedExecId(null);
+      setSelectedNodeId(null);
+      return;
+    }
+    setSelectedExecId(id);
+    setSelectedNodeId(null);
+    if (executionDetails[id]) return; // already cached
+    setLoadingExecId(id);
+    const detail = await fetchExecutionDetail(id);
+    setLoadingExecId(null);
+    if (detail) {
+      setExecutionDetails((prev) => ({ ...prev, [id]: detail }));
+    }
+  }, [selectedExecId, executionDetails]);
 
   const resetProgress = useCallback(() => {
     setStepStates(
@@ -287,17 +316,56 @@ const App: React.FC = () => {
       }
     }
 
-    setLogs((prev) => [
-      {
-        id: prev.length + 1,
-        time: now.toLocaleString(),
-        status: statusOverride,
-        httpStatus: result.httpStatus,
-        message,
-        raw: result.data
-      },
-      ...prev
-    ]);
+    const entry: LogEntry = {
+      id: logs.length + 1,
+      time: now.toLocaleString(),
+      status: statusOverride,
+      httpStatus: result.httpStatus,
+      message,
+      raw: result.data
+    };
+
+    const shouldLogToConsole =
+      import.meta.env.DEV && (import.meta.env.VITE_LOG_TO_CONSOLE as string | undefined) !== 'false';
+
+    const redact = (value: unknown, depth = 0): unknown => {
+      if (depth > 6) return '[redacted:depth]';
+      if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
+      if (!value || typeof value !== 'object') return value;
+      const obj = value as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(obj)) {
+        const key = k.toLowerCase();
+        if (
+          key.includes('token') ||
+          key.includes('api_key') ||
+          key.includes('apikey') ||
+          key.includes('authorization') ||
+          key.includes('secret') ||
+          key.includes('password')
+        ) {
+          out[k] = '[redacted]';
+        } else {
+          out[k] = redact(v, depth + 1);
+        }
+      }
+      return out;
+    };
+
+    if (shouldLogToConsole) {
+      // eslint-disable-next-line no-console
+      console.groupCollapsed(
+        `[n8n] ${statusOverride.toUpperCase()} • HTTP ${result.httpStatus || 'n/a'} • ${now.toLocaleTimeString()}`
+      );
+      // eslint-disable-next-line no-console
+      console.log(entry.message);
+      // eslint-disable-next-line no-console
+      console.log('raw:', redact(entry.raw));
+      // eslint-disable-next-line no-console
+      console.groupEnd();
+    }
+
+    setLogs((prev) => [entry, ...prev]);
   };
 
   const runAutomation = async (file: File | null, promptValue: string) => {
@@ -744,56 +812,206 @@ const App: React.FC = () => {
             <CardHeader>
               <CardTitle>Execution & error logs</CardTitle>
               <CardDescription>
-                Responses and errors from n8n. When available, node-by-node workflow logs are shown.
+                Click any execution to see its node-by-node logs. Refreshes every 30 s.
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {recentExecutions.length > 0 && (
+
+              {/* ── Recent executions list ── */}
+              {recentExecutions.length > 0 ? (
                 <div className="mb-4 space-y-1.5 text-[11px]">
-                  <p className="text-slate-400">Recent executions:</p>
+                  <p className="font-medium text-slate-400">Recent executions — click to expand logs</p>
                   <ul className="space-y-1">
-                    {recentExecutions.map((exec) => (
-                      <li
-                        key={exec.id}
-                        className="flex items-center justify-between gap-2 rounded-lg border border-slate-700/80 bg-slate-950/60 px-2.5 py-1.5"
-                      >
-                        <div className="space-y-0.5">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-[10px] text-slate-300">
-                              {exec.id}
-                            </span>
-                            <span className="text-[10px] text-slate-500">
-                              {new Date(exec.startedAt).toLocaleString()}
-                            </span>
-                          </div>
-                          {exec.stoppedAt && (
-                            <span className="text-[10px] text-slate-500">
-                              Finished: {new Date(exec.stoppedAt).toLocaleString()}
-                            </span>
+                    {recentExecutions.map((exec) => {
+                      const isSelected = selectedExecId === exec.id;
+                      const isLoading = loadingExecId === exec.id;
+                      const detail = executionDetails[exec.id];
+
+                      // Build node list from cached detail
+                      type NodeEntry = { 
+                        name: string; 
+                        startedAt?: string; 
+                        durationMs?: number; 
+                        status: 'done' | 'error' | 'running'; 
+                        raw?: any; 
+                        error?: any 
+                      };
+                      
+                      let detailNodes: NodeEntry[] = [];
+                      if (detail?.data?.resultData?.runData) {
+                        const runData = detail.data.resultData.runData;
+                        const timeline: Array<{ name: string; firstStart: number }> = [];
+                        Object.entries(runData).forEach(([name, runs]) => {
+                          const typedRuns = runs as Array<any>;
+                          if (!typedRuns.length) return;
+                          timeline.push({ name, firstStart: typedRuns[0].startTime });
+                        });
+                        timeline.sort((a, b) => a.firstStart - b.firstStart);
+                        detailNodes = timeline.map(({ name }) => {
+                          const runs = runData[name] as Array<any>;
+                          const last = runs[runs.length - 1];
+                          return {
+                            name,
+                            startedAt: last && typeof last.startTime === 'number'
+                              ? new Date(last.startTime).toLocaleString()
+                              : undefined,
+                            durationMs: last && typeof last.executionTime === 'number'
+                              ? Math.round(last.executionTime)
+                              : undefined,
+                            status: (last.error || (exec.status === 'error' && name === timeline[timeline.length - 1]?.name))
+                              ? 'error'
+                              : 'done',
+                            raw: last.data,
+                            error: last.error
+                          };
+                        });
+                      }
+
+                      return (
+                        <li key={exec.id} className="rounded-lg border border-slate-700/80 bg-slate-950/60 overflow-hidden">
+                          {/* Row header — always visible */}
+                          <button
+                            type="button"
+                            onClick={() => handleSelectExecution(exec.id)}
+                            className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-left hover:bg-slate-800/50 transition-colors"
+                          >
+                            <div className="space-y-0.5 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-mono text-[10px] text-slate-300 truncate">
+                                  {exec.id}
+                                </span>
+                                <span className="text-[10px] text-slate-500 whitespace-nowrap">
+                                  {new Date(exec.startedAt).toLocaleString()}
+                                </span>
+                              </div>
+                              {exec.stoppedAt && (
+                                <span className="text-[10px] text-slate-500">
+                                  Finished: {new Date(exec.stoppedAt).toLocaleString()}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <span
+                                className={`inline-flex h-5 items-center rounded-full px-2 text-[9px] font-semibold uppercase ${
+                                  exec.status === 'success'
+                                    ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/60'
+                                    : exec.status === 'running'
+                                    ? 'bg-sky-500/15 text-sky-300 border border-sky-400/60'
+                                    : exec.status === 'error'
+                                    ? 'bg-rose-500/15 text-rose-200 border border-rose-500/60'
+                                    : 'bg-slate-600/20 text-slate-200 border border-slate-500/60'
+                                }`}
+                              >
+                                {exec.status}
+                              </span>
+                              <span className="text-slate-500 text-[10px]">{isSelected ? '▲' : '▼'}</span>
+                            </div>
+                          </button>
+
+                          {/* Expanded detail panel */}
+                          {isSelected && (
+                            <div className="border-t border-slate-700/60 px-2.5 py-2">
+                              {isLoading ? (
+                                <div className="flex items-center gap-2 text-[10px] text-slate-400 py-1">
+                                  <span className="h-3 w-3 animate-spin rounded-full border border-slate-500 border-t-sky-400" />
+                                  Loading node logs…
+                                </div>
+                              ) : detailNodes.length > 0 ? (
+                                <div className="space-y-3">
+                                  <ul className="space-y-1">
+                                    {detailNodes.map((node) => {
+                                      const isNodeSelected = selectedNodeId === `${exec.id}-${node.name}`;
+                                      return (
+                                        <li key={node.name} className="space-y-1">
+                                          <button
+                                            onClick={() => setSelectedNodeId(isNodeSelected ? null : `${exec.id}-${node.name}`)}
+                                            className={`flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1.5 transition-colors ${
+                                              isNodeSelected
+                                                ? 'border-sky-500/50 bg-sky-500/10'
+                                                : 'border-slate-700/40 bg-slate-900/70 hover:bg-slate-800/80'
+                                            }`}
+                                          >
+                                            <div className="space-y-0 text-left">
+                                              <span className="font-medium text-slate-100 text-[10px]">{node.name}</span>
+                                              <div className="flex items-center gap-2 text-[9px] text-slate-500">
+                                                {node.startedAt && <span>{node.startedAt}</span>}
+                                                {typeof node.durationMs === 'number' && (
+                                                  <span>• {node.durationMs} ms</span>
+                                                )}
+                                              </div>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                              <span
+                                                className={`inline-flex h-4 items-center rounded-full px-1.5 text-[9px] font-semibold uppercase ${
+                                                  node.status === 'running'
+                                                    ? 'bg-sky-500/15 text-sky-300 border border-sky-400/60'
+                                                    : node.status === 'error'
+                                                    ? 'bg-rose-500/15 text-rose-200 border border-rose-500/60'
+                                                    : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/50'
+                                                }`}
+                                              >
+                                                {node.status}
+                                              </span>
+                                              <span className="text-[10px] text-slate-500">{isNodeSelected ? '▲' : '▼'}</span>
+                                            </div>
+                                          </button>
+
+                                          {/* Node Data Inspection */}
+                                          {isNodeSelected && (
+                                            <div className="space-y-3 rounded-lg border border-slate-800/60 bg-slate-950/40 p-2 ml-1">
+                                              {node.error && (
+                                                <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-2">
+                                                  <p className="font-bold text-rose-400 text-[9px] uppercase tracking-wider mb-1">Execution Error</p>
+                                                  <p className="text-[10px] text-rose-200 leading-tight">{node.error.message}</p>
+                                                  {node.error.description && (
+                                                     <p className="mt-1 text-[9px] text-rose-300/70 italic">{node.error.description}</p>
+                                                  )}
+                                                </div>
+                                              )}
+                                              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                                <JsonView title="Output Data (main)" data={node.raw?.main} />
+                                                <JsonView title="Input Data" data={node.raw?.input} />
+                                              </div>
+                                            </div>
+                                          )}
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                  
+                                  {/* Global Execution Error */}
+                                  {detail.data?.resultData?.error && (
+                                    <div className="mt-2 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3">
+                                      <p className="font-bold text-rose-300 text-[10px] uppercase mb-1">Workflow Error</p>
+                                      <p className="text-[11px] text-slate-100">{detail.data.resultData.error.message}</p>
+                                      {detail.data.resultData.error.stack && (
+                                        <pre className="mt-2 max-h-32 overflow-auto text-[9px] text-rose-200/50 leading-relaxed font-mono">
+                                          {detail.data.resultData.error.stack}
+                                        </pre>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <p className="text-[10px] text-slate-500 py-1">No node data available for this execution.</p>
+                              )}
+                            </div>
                           )}
-                        </div>
-                        <span
-                          className={`inline-flex h-5 items-center rounded-full px-2 text-[9px] font-semibold uppercase ${
-                            exec.status === 'success'
-                              ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/60'
-                              : exec.status === 'running'
-                              ? 'bg-sky-500/15 text-sky-300 border border-sky-400/60'
-                              : exec.status === 'error'
-                              ? 'bg-rose-500/15 text-rose-200 border border-rose-500/60'
-                              : 'bg-slate-600/20 text-slate-200 border border-slate-500/60'
-                          }`}
-                        >
-                          {exec.status}
-                        </span>
-                      </li>
-                    ))}
+                        </li>
+                      );
+                    })}
                   </ul>
+                </div>
+              ) : (
+                <div className="mb-4 rounded-xl border border-dashed border-slate-700/80 bg-slate-950/50 px-4 py-3 text-[11px] text-slate-400">
+                  No recent executions found. Ensure the n8n API is configured.
                 </div>
               )}
 
+              {/* ── Live node logs for the current run ── */}
               {nodeLogs.length > 0 && (
                 <div className="mb-3 space-y-1.5 text-[11px]">
-                  <p className="text-slate-400">Current execution (node-by-node):</p>
+                  <p className="font-medium text-slate-400">Current execution (live node-by-node):</p>
                   <ul className="space-y-1.5">
                     {nodeLogs.map((node) => (
                       <li
@@ -832,35 +1050,39 @@ const App: React.FC = () => {
                 </div>
               )}
 
+              {/* ── Session run logs ── */}
               {logs.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-slate-700/80 bg-slate-950/50 px-4 py-3 text-[11px] text-slate-400">
-                  No runs yet. Trigger the automation to see logs here.
+                  No runs yet this session. Trigger the automation to see logs here.
                 </div>
               ) : (
-                <ul className="flex max-h-64 flex-col gap-2 overflow-y-auto text-[11px]">
-                  {logs.map((log) => (
-                    <li
-                      key={log.id}
-                      className={`rounded-xl border px-3 py-2 ${
-                        log.status === 'success'
-                          ? 'border-emerald-500/60 bg-emerald-500/10'
-                          : log.status === 'error'
-                          ? 'border-rose-500/70 bg-rose-500/10'
-                          : 'border-slate-700/80 bg-slate-950/50'
-                      }`}
-                    >
-                      <div className="mb-1 flex items-center justify-between gap-3 text-[10px]">
-                        <span className="text-slate-300">{log.time}</span>
-                        <span className="font-semibold text-slate-50">
-                          {log.status.toUpperCase()} • HTTP {log.httpStatus || 'n/a'}
-                        </span>
-                      </div>
-                      <pre className="max-h-40 whitespace-pre-wrap break-words text-[10px] text-slate-100/90">
-                        {log.message}
-                      </pre>
-                    </li>
-                  ))}
-                </ul>
+                <div className="space-y-1.5">
+                  <p className="font-medium text-[11px] text-slate-400">This session's run logs</p>
+                  <ul className="flex max-h-64 flex-col gap-2 overflow-y-auto text-[11px]">
+                    {logs.map((log) => (
+                      <li
+                        key={log.id}
+                        className={`rounded-xl border px-3 py-2 ${
+                          log.status === 'success'
+                            ? 'border-emerald-500/60 bg-emerald-500/10'
+                            : log.status === 'error'
+                            ? 'border-rose-500/70 bg-rose-500/10'
+                            : 'border-slate-700/80 bg-slate-950/50'
+                        }`}
+                      >
+                        <div className="mb-1 flex items-center justify-between gap-3 text-[10px]">
+                          <span className="text-slate-300">{log.time}</span>
+                          <span className="font-semibold text-slate-50">
+                            {log.status.toUpperCase()} • HTTP {log.httpStatus || 'n/a'}
+                          </span>
+                        </div>
+                        <pre className="max-h-40 whitespace-pre-wrap break-words text-[10px] text-slate-100/90">
+                          {log.message}
+                        </pre>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </CardContent>
           </Card>

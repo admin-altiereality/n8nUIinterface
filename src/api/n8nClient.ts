@@ -29,7 +29,22 @@ export interface N8nExecution {
   stoppedAt?: string;
   data?: {
     resultData?: {
-      runData?: Record<string, Array<{ startTime: number; executionTime?: number }>>;
+      runData?: Record<string, Array<{
+        startTime: number;
+        executionTime?: number;
+        data?: {
+          main?: any[][];
+        };
+        error?: {
+          message?: string;
+          stack?: string;
+          description?: string;
+        };
+      }>>;
+      error?: {
+        message: string;
+        stack?: string;
+      };
     };
   };
 }
@@ -46,9 +61,13 @@ export interface N8nExecutionListItem {
 const WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL as string | undefined;
 const N8N_API_URL = import.meta.env.VITE_N8N_API_URL as string | undefined;
 const N8N_API_KEY = import.meta.env.VITE_N8N_API_KEY as string | undefined;
+const API_PROXY_URL = import.meta.env.VITE_API_PROXY_URL as string | undefined;
 
-/** True if we can poll execution status (needs VITE_N8N_API_URL + VITE_N8N_API_KEY). */
-export const canPollExecution = Boolean(N8N_API_URL && N8N_API_KEY);
+/**
+ * True if we can poll execution status.
+ * Prefer the backend proxy (VITE_API_PROXY_URL) to avoid exposing API keys in the browser.
+ */
+export const canPollExecution = Boolean(API_PROXY_URL || (N8N_API_URL && N8N_API_KEY));
 
 if (!WEBHOOK_URL) {
   // eslint-disable-next-line no-console
@@ -118,14 +137,51 @@ export async function triggerAutomation(params: {
 
 /** Poll n8n execution status (optional: set VITE_N8N_API_URL and VITE_N8N_API_KEY). */
 export async function getExecutionStatus(executionId: string): Promise<N8nExecution | null> {
-  if (!N8N_API_URL || !N8N_API_KEY) return null;
-  const base = N8N_API_URL.replace(/\/$/, '');
-  const url = `${base}/api/v1/executions/${encodeURIComponent(executionId)}`;
+  const proxyBase = API_PROXY_URL?.replace(/\/$/, '');
+  const directBase = N8N_API_URL?.replace(/\/$/, '');
+  const url =
+    proxyBase
+      ? `${proxyBase}/n8n/executions/${encodeURIComponent(executionId)}`
+      : directBase
+      ? `${directBase}/api/v1/executions/${encodeURIComponent(executionId)}`
+      : null;
+  if (!url) return null;
   try {
     const res = await fetch(url, {
-      headers: {
-        'X-N8N-API-KEY': N8N_API_KEY
-      }
+      headers: proxyBase
+        ? undefined
+        : N8N_API_KEY
+        ? { 'X-N8N-API-KEY': N8N_API_KEY }
+        : undefined
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as N8nExecution;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch a single execution with full runData included.
+ * This is the same as getExecutionStatus but forces includeData=true.
+ * Works via the proxy (which adds ?includeData=true server-side) or directly via API.
+ */
+export async function fetchExecutionDetail(executionId: string): Promise<N8nExecution | null> {
+  const proxyBase = API_PROXY_URL?.replace(/\/$/, '');
+  const directBase = N8N_API_URL?.replace(/\/$/, '');
+  const url = proxyBase
+    ? `${proxyBase}/n8n/executions/${encodeURIComponent(executionId)}`
+    : directBase
+    ? `${directBase}/api/v1/executions/${encodeURIComponent(executionId)}?includeData=true`
+    : null;
+  if (!url) return null;
+  try {
+    const res = await fetch(url, {
+      headers: proxyBase
+        ? undefined
+        : N8N_API_KEY
+        ? { 'X-N8N-API-KEY': N8N_API_KEY }
+        : undefined
     });
     if (!res.ok) return null;
     return (await res.json()) as N8nExecution;
@@ -138,14 +194,22 @@ export async function getExecutionStatus(executionId: string): Promise<N8nExecut
 export async function listExecutions(
   limit = 10
 ): Promise<N8nExecutionListItem[] | null> {
-  if (!N8N_API_URL || !N8N_API_KEY) return null;
-  const base = N8N_API_URL.replace(/\/$/, '');
-  const url = `${base}/api/v1/executions?take=${encodeURIComponent(limit)}`;
+  const proxyBase = API_PROXY_URL?.replace(/\/$/, '');
+  const directBase = N8N_API_URL?.replace(/\/$/, '');
+  const url =
+    proxyBase
+      ? `${proxyBase}/n8n/executions?limit=${encodeURIComponent(limit)}`
+      : directBase
+      ? `${directBase}/api/v1/executions?take=${encodeURIComponent(limit)}`
+      : null;
+  if (!url) return null;
   try {
     const res = await fetch(url, {
-      headers: {
-        'X-N8N-API-KEY': N8N_API_KEY
-      }
+      headers: proxyBase
+        ? undefined
+        : N8N_API_KEY
+        ? { 'X-N8N-API-KEY': N8N_API_KEY }
+        : undefined
     });
     if (!res.ok) return null;
     const json = (await res.json()) as { data?: N8nExecutionListItem[] } | N8nExecutionListItem[];
