@@ -53,7 +53,9 @@ const NODE_TO_STEP: Partial<Record<string, PipelineStepId>> = {
 };
 
 const App: React.FC = () => {
-  const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [pdfFiles, setPdfFiles] = useState<File[]>([]);
+  const [currentFileIndex, setCurrentFileIndex] = useState<number>(-1);
+  const [isBatchMode, setIsBatchMode] = useState<boolean>(false);
   const [prompt, setPrompt] = useState<string>('');
   const [language, setLanguage] = useState<string>(''); // required
   const [curriculum, setCurriculum] = useState<string>(''); // optional
@@ -295,8 +297,9 @@ const App: React.FC = () => {
   }, [executionId, status, setAllStepsDone, setStepsDoneUpTo]);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0] ?? null;
-    setPdfFile(file);
+    const files = Array.from(event.target.files ?? []);
+    setPdfFiles(files);
+    setCurrentFileIndex(-1); // reset index when files change
   };
 
   const appendLog = (result: RunResult, statusOverride: ExecutionStatus) => {
@@ -454,17 +457,57 @@ const App: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (isBatchMode && (status === 'success' || status === 'error')) {
+      const timer = setTimeout(() => {
+        if (currentFileIndex < pdfFiles.length - 1) {
+          const nextIndex = currentFileIndex + 1;
+          setCurrentFileIndex(nextIndex);
+          runAutomation(pdfFiles[nextIndex], prompt);
+        } else {
+          setIsBatchMode(false);
+        }
+      }, 2000); // small delay between files
+      return () => clearTimeout(timer);
+    }
+  }, [status, isBatchMode, currentFileIndex, pdfFiles, prompt]);
+
   const handleRun = async () => {
     if (status === 'running') return;
-    await runAutomation(pdfFile, prompt);
+
+    if (pdfFiles.length === 0) {
+      const message = 'Please upload at least one PDF file.';
+      const fallback: RunResult = {
+        ok: false,
+        httpStatus: 0,
+        data: null,
+        errorMessage: message
+      };
+      setFormError(message);
+      appendLog(fallback, 'error');
+      return;
+    }
+
+    if (pdfFiles.length > 1) {
+      setIsBatchMode(true);
+      setCurrentFileIndex(0);
+      await runAutomation(pdfFiles[0], prompt);
+    } else {
+      setIsBatchMode(false);
+      setCurrentFileIndex(0);
+      await runAutomation(pdfFiles[0], prompt);
+    }
   };
 
   const handleQuickStart = async () => {
     if (status === 'running') return;
+    setIsBatchMode(false);
+    setCurrentFileIndex(-1);
     await runAutomation(null, '');
   };
 
   const handleStop = () => {
+    setIsBatchMode(false);
     if (status !== 'running') return;
 
     if (rotateRef.current) {
@@ -561,18 +604,26 @@ const App: React.FC = () => {
                   <input
                     type="file"
                     accept="application/pdf"
+                    multiple
                     onChange={handleFileChange}
                     disabled={status === 'running'}
                     className="absolute inset-0 cursor-pointer opacity-0"
                   />
                   <span className="rounded-full bg-slate-900/80 px-3 py-0.5 text-[11px] font-medium text-slate-200 ring-1 ring-slate-700/70">
-                    {pdfFile ? 'PDF selected' : 'Choose a PDF file'}
+                    {pdfFiles.length > 0 ? `${pdfFiles.length} PDF(s) selected` : 'Choose PDF file(s)'}
                   </span>
-                  <span className="text-[11px] text-slate-400">
-                    {pdfFile
-                      ? `${pdfFile.name} • ${(pdfFile.size / (1024 * 1024)).toFixed(2)} MB`
-                      : 'Click to browse a chapter PDF (PDF only)'}
-                  </span>
+                  <div className="flex flex-col items-center gap-1 text-[11px] text-slate-400">
+                    {pdfFiles.length > 0 ? (
+                      pdfFiles.map((f, i) => (
+                        <span key={i} className={i === currentFileIndex ? 'font-bold text-sky-400' : ''}>
+                          {f.name} {i === currentFileIndex && ' (Processing...)'}
+                          {i < currentFileIndex && ' (Done)'}
+                        </span>
+                      ))
+                    ) : (
+                      'Click to browse chapter PDF(s) (PDF only)'
+                    )}
+                  </div>
                 </label>
               </CardContent>
             </Card>
@@ -629,6 +680,8 @@ const App: React.FC = () => {
                       <option value="">Select language…</option>
                       <option value="en">English</option>
                       <option value="hi">Hindi</option>
+                      <option value="de">German</option>
+                      <option value="es">Spanish</option>
                     </Select>
                   </div>
                   <div className="space-y-1.5">
@@ -751,6 +804,24 @@ const App: React.FC = () => {
               )}
             </CardHeader>
             <CardContent>
+              {isBatchMode && (
+                <div className="mb-6 rounded-xl border border-sky-500/30 bg-sky-500/5 px-4 py-3 shadow-sm">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold tracking-tight text-sky-100 italic">
+                      STEP {currentFileIndex + 1} OF {pdfFiles.length}
+                    </span>
+                    <span className="truncate text-[10px] font-medium text-sky-300/80">
+                      Processing: {pdfFiles[currentFileIndex]?.name}
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800/80">
+                    <div
+                      className="h-full bg-sky-400 transition-all duration-700 ease-in-out shadow-[0_0_8px_rgba(56,189,248,0.5)]"
+                      style={{ width: `${((currentFileIndex + 1) / pdfFiles.length) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
               <div className="mb-3">
                 <div className="mb-1 flex items-center justify-between text-[11px] text-slate-400">
                   <span>Overall progress</span>
