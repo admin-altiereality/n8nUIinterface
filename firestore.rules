@@ -1,0 +1,837 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function to check if user is admin (safe - handles missing user doc)
+    function isAdmin() {
+      return request.auth != null && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    
+    // Helper function to check if user is superadmin (safe - handles missing user doc)
+    function isSuperadmin() {
+      return request.auth != null && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'superadmin';
+    }
+    
+    // Helper function to check if user is admin or superadmin
+    function isAdminOrSuperadmin() {
+      return isAdmin() || isSuperadmin();
+    }
+    
+    // Helper function to check if user is associate (lesson refinement role)
+    function isAssociate() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'associate';
+    }
+    
+    // Helper: admin, superadmin, or associate (for lesson edit access)
+    function isStaffContentEditor() {
+      return isAdminOrSuperadmin() || isAssociate();
+    }
+    
+    // Helper function to check if asset is core (protected from admin deletion)
+    function isCoreAsset(assetData) {
+      return assetData.isCore == true || assetData.assetTier == 'core';
+    }
+    
+    // Helper function to check if user owns the document
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+    
+    // ============================================
+    // LMS Helper Functions (Multi-School RBAC)
+    // ============================================
+    
+    // Get user's school_id (safe - returns null if missing)
+    function getUserSchoolId() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id : 
+        null;
+    }
+    
+    // Get user's role (safe - returns null if user doc missing)
+    function getUserRole() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role : 
+        null;
+    }
+    
+    // Check if user can access school data (expression-only: no if/else in rules functions)
+    // When getUserRole() is null, treat as no access
+    function canAccessSchool(schoolId) {
+      return isAuthenticated() && (
+        (getUserRole() == 'superadmin' || getUserRole() == 'admin') ||
+        (getUserRole() == 'principal' && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id == schoolId) ||
+        (getUserSchoolId() == schoolId)
+      );
+    }
+    
+    // Check if teacher can access student (expression-only: no if/else in rules functions)
+    function canAccessStudent(studentId, studentSchoolId) {
+      return isAuthenticated() && (
+        studentId == request.auth.uid ||
+        (getUserRole() == 'superadmin' || getUserRole() == 'admin') ||
+        (getUserRole() == 'principal' && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id == studentSchoolId) ||
+        (getUserRole() == 'teacher' && getUserSchoolId() == studentSchoolId &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids != null &&
+         get(/databases/$(database)/documents/users/$(studentId)).data.class_ids != null &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids.hasAny(get(/databases/$(database)/documents/users/$(studentId)).data.class_ids))
+      );
+    }
+    
+    // Helper function to check if teacher can approve student (hierarchical approval)
+    // For PENDING students: Teachers can approve any student in their school (they don't have classes yet)
+    // For APPROVED students: Teachers can approve students in their classes
+    // Expression-only: no if/else or let statements
+    function canTeacherApproveStudent(studentId) {
+      return getUserRole() == 'teacher' &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id != null &&
+        get(/databases/$(database)/documents/users/$(studentId)).data.school_id != null &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == get(/databases/$(database)/documents/users/$(studentId)).data.school_id &&
+        (
+          // For PENDING students: Allow approval (they don't have classes yet)
+          get(/databases/$(database)/documents/users/$(studentId)).data.approvalStatus == 'pending' ||
+          // For APPROVED students: Check if student is in any of teacher's classes
+          // If teacher has no classes yet, allow (they can approve before being assigned classes)
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids == null ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids.size() == 0 ||
+          // If student has no classes, allow (they might be approved but not yet assigned)
+          get(/databases/$(database)/documents/users/$(studentId)).data.class_ids == null ||
+          get(/databases/$(database)/documents/users/$(studentId)).data.class_ids.size() == 0 ||
+          // Check if they share any classes
+          (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids != null &&
+           get(/databases/$(database)/documents/users/$(studentId)).data.class_ids != null &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids.hasAny(get(/databases/$(database)/documents/users/$(studentId)).data.class_ids))
+        );
+    }
+    
+    // Helper function to check if school admin/principal can approve student
+    // School admins and principals can approve any student in their school
+    // Expression-only: no if/else or let statements
+    function canSchoolApproveStudent(studentId) {
+      return isAuthenticated() &&
+        (getUserRole() == 'school' || getUserRole() == 'principal') &&
+        // Get approver's school_id (principal uses managed_school_id, school uses school_id)
+        ((getUserRole() == 'principal' && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id != null &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id == get(/databases/$(database)/documents/users/$(studentId)).data.school_id) ||
+         (getUserRole() == 'school' && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id != null &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == get(/databases/$(database)/documents/users/$(studentId)).data.school_id)) &&
+        get(/databases/$(database)/documents/users/$(studentId)).data.school_id != null;
+    }
+    
+    // Helper function to check if school admin/principal can read teacher
+    // For collection queries: allows reading teachers in their school
+    // Expression-only: no if/else or let statements
+    function canSchoolReadTeacher(teacherSchoolId, teacherApprovalStatus) {
+      return isAuthenticated() &&
+        (getUserRole() == 'school' || getUserRole() == 'principal') &&
+        // For PENDING teachers: Allow reading ANY pending teacher (they might not have school_id yet, or it might be from another school)
+        // School admins/principals need to see pending teachers to approve them
+        // The client-side canApproveUser check will ensure they can only approve appropriate teachers
+        (teacherApprovalStatus == 'pending' ||
+         // For APPROVED teachers: Only allow if school_id matches approver's school
+         (getUserRole() == 'principal' && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id != null &&
+          teacherSchoolId != null &&
+          teacherSchoolId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id) ||
+         (getUserRole() == 'school' && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id != null &&
+          teacherSchoolId != null &&
+          teacherSchoolId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id));
+    }
+    
+    // Helper function to check if school admin/principal can approve teacher (hierarchical approval)
+    // For PENDING teachers: School admins/principals can approve any teacher in their school (they might not have school_id yet)
+    // For APPROVED teachers: School admins/principals can approve teachers in their school
+    // Expression-only: no if/else or let statements
+    function canSchoolApproveTeacher(teacherId) {
+      return isAuthenticated() &&
+        (getUserRole() == 'school' || getUserRole() == 'principal') &&
+        // Get approver's school_id (principal uses managed_school_id, school uses school_id)
+        ((getUserRole() == 'principal' && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id != null) ||
+         (getUserRole() == 'school' && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id != null)) &&
+        (
+          // For PENDING teachers: Allow approval (they might not have school_id yet, or it might be different)
+          get(/databases/$(database)/documents/users/$(teacherId)).data.approvalStatus == 'pending' ||
+          // For APPROVED teachers: Check if teacher's school_id matches approver's school_id
+          (getUserRole() == 'principal' && 
+           get(/databases/$(database)/documents/users/$(teacherId)).data.school_id != null &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id == get(/databases/$(database)/documents/users/$(teacherId)).data.school_id) ||
+          (getUserRole() == 'school' && 
+           get(/databases/$(database)/documents/users/$(teacherId)).data.school_id != null &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == get(/databases/$(database)/documents/users/$(teacherId)).data.school_id)
+        );
+    }
+    
+    // Users collection - users can read/write their own data
+    // Hierarchical approval system: teachers can approve students, schools can approve teachers, admins approve schools
+    // Demo users (isDemo: true, signed in with Google) have same access as regular users; owner may set isDemo and demoLocation
+    match /users/{userId} {
+      // Allow read if:
+      // 1. User is reading their own document, OR
+      // 2. Superadmin/admin (needed for approvals page queries), OR
+      // 3. Teacher reading students in their school (will filter by class_ids client-side), OR
+      // 4. School admin/principal reading students in their school (needed for approval pages), OR
+      // 5. School admin/principal reading teachers in their school
+      allow read: if isOwner(userId) || 
+                     isSuperadmin() || 
+                     isAdmin() ||
+                     // Teachers can read students in their school
+                     (getUserRole() == 'teacher' && resource.data.role == 'student' && 
+                      resource.data.school_id != null &&
+                      canAccessSchool(resource.data.school_id)) ||
+                     // Teachers can read other teachers in the same school (for class sharing / dashboard)
+                     (getUserRole() == 'teacher' && resource.data.role == 'teacher' && 
+                      resource.data.school_id != null &&
+                      exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == resource.data.school_id) ||
+                     // School admin/principal can read students in their school (simplified for collection queries)
+                     // For collection queries: Firestore can validate this at query time
+                     (resource.data.role == 'student' && 
+                      resource.data.school_id != null &&
+                      isAuthenticated() &&
+                      exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                      ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'principal' && 
+                        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id == resource.data.school_id) ||
+                       (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'school' && 
+                        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == resource.data.school_id))) ||
+                     // School admin/principal can read teachers in their school
+                     // Use simplified helper function for better collection query performance
+                     ((getUserRole() == 'school' || getUserRole() == 'principal') && resource.data.role == 'teacher' && 
+                      canSchoolReadTeacher(resource.data.school_id, resource.data.approvalStatus)) ||
+                     // Students can read teachers assigned to their classes
+                     (getUserRole() == 'student' && resource.data.role == 'teacher' &&
+                      resource.data.managed_class_ids != null &&
+                      exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.class_ids != null &&
+                      resource.data.managed_class_ids.hasAny(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.class_ids));
+      
+      allow create: if isOwner(userId);
+      
+      // Allow update if:
+      // 1. User is updating their own document (but not approvalStatus or role), OR
+      // 2. User is completing onboarding: setting approvalStatus to 'pending' only (no role change), OR
+      // 3. Guest completing onboarding: owner sets isGuest and approvalStatus to 'approved' (no role change), OR
+      // 4. Superadmin/admin updating (needed for approval actions), OR
+      // 5. Teacher updating approvalStatus for students in their school (including pending students), OR
+      // 6. School admin/principal updating approvalStatus for students in their school, OR
+      // 7. School updating approvalStatus for teachers in their school
+      allow update: if (isOwner(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['approvalStatus', 'role'])) || 
+                       (isOwner(userId) && request.resource.data.approvalStatus == 'pending' && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])) ||
+                       (isOwner(userId) && request.resource.data.isGuest == true && request.resource.data.approvalStatus == 'approved' && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])) ||
+                       isSuperadmin() ||
+                       (isAdmin() && resource.data.role == 'school') ||
+                       // Teacher can approve/reject students in their school (allows school_id update too)
+                       (getUserRole() == 'teacher' && resource.data.role == 'student' && canTeacherApproveStudent(userId) && 
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['approvalStatus', 'approvedBy', 'approvedAt', 'rejectedBy', 'rejectedAt', 'school_id', 'updatedAt'])) ||
+                       // Teacher can update class_ids for students in their school (for assigning students to their classes)
+                       (getUserRole() == 'teacher' && resource.data.role == 'student' && 
+                        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id != null &&
+                        resource.data.school_id != null &&
+                        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == resource.data.school_id &&
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['class_ids', 'updatedAt'])) ||
+                       // School admin/principal can approve/reject students in their school (allows school_id update too)
+                       ((getUserRole() == 'school' || getUserRole() == 'principal') && resource.data.role == 'student' && canSchoolApproveStudent(userId) && 
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['approvalStatus', 'approvedBy', 'approvedAt', 'rejectedBy', 'rejectedAt', 'school_id', 'updatedAt'])) ||
+                       // School admin/principal can approve/reject teachers (similar to superadmin for teachers)
+                       // Simplified: Allow school admins/principals to approve any teacher
+                       // Client-side canApproveUser check will ensure they only approve appropriate teachers
+                       ((getUserRole() == 'school' || getUserRole() == 'principal') && resource.data.role == 'teacher' && 
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['approvalStatus', 'approvedBy', 'approvedAt', 'rejectedBy', 'rejectedAt', 'school_id', 'updatedAt'])) ||
+                       // School admin/principal can update managed_class_ids for teachers in their school (for class assignment)
+                       ((getUserRole() == 'school' || getUserRole() == 'principal') && resource.data.role == 'teacher' && 
+                        ((getUserRole() == 'principal' && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id != null &&
+                          resource.data.school_id != null &&
+                          resource.data.school_id == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id) ||
+                         (getUserRole() == 'school' && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id != null &&
+                          resource.data.school_id != null &&
+                          resource.data.school_id == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id)) &&
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['managed_class_ids', 'updatedAt']));
+      
+      allow delete: if isSuperadmin();
+    }
+
+    // FCM tokens subcollection - user can write their own tokens for push notifications
+    match /users/{userId}/fcm_tokens/{tokenId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Skyboxes collection - all authenticated users can read (needed for lessons)
+    // Users can only write their own skyboxes
+    match /skyboxes/{skyboxId} {
+      // Any authenticated user can read skyboxes (needed for VR lessons to load stored_glb_url)
+      allow read: if request.auth != null;
+      
+      allow create: if request.auth != null && 
+        request.resource.data.userId == request.auth.uid;
+      
+      allow update: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow delete: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+    }
+    
+    // 3D Assets collection - users can read/write their own assets
+    match /3d_assets/{assetId} {
+      allow read: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow create: if request.auth != null && 
+        request.resource.data.userId == request.auth.uid;
+      
+      allow update: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow delete: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+    }
+    
+    // Skybox styles collection - public read access
+    match /skyboxStyles/{styleId} {
+      allow read: if true; // Public read access for styles
+      allow write: if isAdmin(); // Only admins can write
+    }
+    
+    // Style usage statistics collection - public read access, backend-only writes
+    match /style_usage_stats/{styleId} {
+      allow read: if true; // Public read access for usage stats (needed for explore page)
+      allow write: if false; // Only backend/service can write (via Firebase Admin SDK)
+    }
+    
+    // Subscriptions collection - users can read their own subscriptions
+    match /subscriptions/{subscriptionId} {
+      allow read: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow create: if request.auth != null && 
+        request.resource.data.userId == request.auth.uid;
+      
+      allow update: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow delete: if isAdmin();
+    }
+    
+    // Orders collection - users can read their own orders
+    match /orders/{orderId} {
+      allow read: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow create: if request.auth != null && 
+        request.resource.data.userId == request.auth.uid;
+      
+      allow update: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow delete: if isAdmin();
+    }
+    
+    // Unified jobs collection - users can read/write their own jobs
+    match /unified_jobs/{jobId} {
+      allow read: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow create: if request.auth != null && 
+        request.resource.data.userId == request.auth.uid;
+      
+      allow update: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      allow delete: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+    }
+    
+    // Public collections - read access for all authenticated users
+    match /public/{document=**} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+    
+    // System collections - only admins and service accounts
+    match /system/{document=**} {
+      allow read, write: if isAdmin() || request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+    
+    // Curriculum Chapters collection - public read access, admin/superadmin write access
+    // Document structure: {curriculum}_{class}_{subject}_ch{chapter_number}
+    // Example: "CBSE_8_Science_ch3"
+    match /curriculum_chapters/{chapterId} {
+      // Public read access for all authenticated users (needed for learning content)
+      allow read: if isAuthenticated();
+      
+      // Admin and superadmin can create; associate can only update (refine)
+      allow create: if isAdminOrSuperadmin();
+      
+      // Update: admin, superadmin, or associate (associate cannot delete)
+      allow update: if isStaffContentEditor() && (
+        // Allow updates if not modifying approval fields
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['topics']) ||
+        // OR if modifying topics, ensure approval fields are only changed by admin/superadmin
+        // (This is handled by the client-side check, but we validate here too)
+        true
+      );
+      
+      // Only superadmin can delete entire lessons (destructive action)
+      allow delete: if isSuperadmin();
+      
+      // History subcollection (legacy edit history; staff can add entries)
+      match /history/{entryId} {
+        allow read: if isAuthenticated();
+        allow create: if isStaffContentEditor();
+        allow update, delete: if isStaffContentEditor();
+      }
+
+      // Versions subcollection — draft commits (v1, v2, v3...); main doc untouched until Superadmin approves
+      match /versions/{versionId} {
+        allow read: if isAuthenticated();
+        allow create: if isStaffContentEditor();
+        allow update: if isStaffContentEditor();  // For approval status (Superadmin)
+        allow delete: if isSuperadmin();
+      }
+    }
+    
+    // Lesson versions (per-topic version history for History tab and approval workflow)
+    match /lesson_versions/{versionId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isSuperadmin();
+    }
+
+    // Lesson snapshots (full bundle snapshots referenced by lesson_versions) — legacy
+    match /lesson_snapshots/{snapshotId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isSuperadmin();
+    }
+
+    // Chapter snapshots (full bundle for curriculum_chapters/versions; used for revert/approve)
+    match /chapter_snapshots/{snapshotId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isSuperadmin();
+    }
+    
+    // Chapter MCQs collection - read access for authenticated users
+    // Associate can create/update (same as admin); only superadmin can delete
+    match /chapter_mcqs/{mcqId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isSuperadmin();
+    }
+    
+    // Chapter TTS collection - read access for authenticated users
+    match /chapter_tts/{ttsId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isSuperadmin();
+    }
+    
+    // Chapter Avatar Scripts collection - read access for authenticated users
+    match /chapter_avatar_scripts/{scriptId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isSuperadmin();
+    }
+    
+    // Chapter Images collection - read access for authenticated users
+    match /chapter_images/{imageId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      // Admin/superadmin can delete (associate cannot delete)
+      allow delete: if isAdminOrSuperadmin() && 
+        (!isCoreAsset(resource.data) || isSuperadmin());
+    }
+    
+    // PDFs collection - read access for authenticated users (studio: add/update PDFs)
+    match /pdfs/{pdfId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isSuperadmin();
+    }
+    
+    // Text to 3D Assets collection - read access for authenticated users
+    match /text_to_3d_assets/{assetId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isAdminOrSuperadmin() && 
+        (!isCoreAsset(resource.data) || isSuperadmin());
+    }
+    
+    // Text to 3D collection (alternative name used by getLessonBundle)
+    match /text_to_3d/{assetId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isStaffContentEditor();
+      allow delete: if isAdminOrSuperadmin() && (!isCoreAsset(resource.data) || isSuperadmin());
+    }
+    
+    // Avatar to 3D Assets collection - read access for authenticated users
+    match /avatar_to_3d_assets/{assetId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      // Staff can delete pending/non-core assets (e.g. when approving detected → create manual flow)
+      allow delete: if (isStaffContentEditor() && !isCoreAsset(resource.data)) ||
+        (isAdminOrSuperadmin() && (!isCoreAsset(resource.data) || isSuperadmin()));
+    }
+    
+    // Meshy Assets collection - 3D assets from meshy_assets
+    match /meshy_assets/{assetId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isAdminOrSuperadmin() && 
+        (!isCoreAsset(resource.data) || isSuperadmin());
+    }
+    
+    // Skybox GLB URLs collection - read access for authenticated users
+    match /skybox_glb_urls/{urlId} {
+      allow read: if isAuthenticated();
+      allow create: if isStaffContentEditor();
+      allow update: if isStaffContentEditor();
+      allow delete: if isAdminOrSuperadmin() && 
+        (!isCoreAsset(resource.data) || isSuperadmin());
+    }
+    
+    // Chapter Edit Requests - Associate submits; Admin/Superadmin approve/reject
+    match /chapter_edit_requests/{requestId} {
+      allow read: if isAuthenticated() && 
+        (resource.data.requestedBy == request.auth.uid || isAdminOrSuperadmin());
+      allow create: if isAuthenticated() && request.resource.data.requestedBy == request.auth.uid;
+      allow update: if isAuthenticated() && isAdminOrSuperadmin();
+      allow delete: if false;
+    }
+    
+    // API Keys collection - users can read their own keys, no direct write access
+    // Write operations only through backend (Admin SDK)
+    match /api_keys/{keyId} {
+      allow read: if request.auth != null && 
+        (resource.data.userId == request.auth.uid || isAdmin());
+      
+      // Write operations only through backend (Admin SDK)
+      allow write: if false;
+    }
+    
+    // ============================================
+    // LMS Collections (Multi-School RBAC)
+    // Supports web and mobile (learnxr-evoneuralai). Mobile: query classes with school_id constraint.
+    // ============================================
+    
+    // Schools collection - any authenticated user can read approved schools (for teacher/student onboarding)
+    // Check approval first so we never need user doc (avoids failure for new users without profile yet)
+    match /schools/{schoolId} {
+      allow read: if isAuthenticated() && (resource.data.approvalStatus == 'approved' || canAccessSchool(schoolId));
+      allow create: if isAdminOrSuperadmin() || 
+        (isAuthenticated() && request.resource.data.createdBy == request.auth.uid);
+      allow update: if isAdminOrSuperadmin() || 
+        (isAuthenticated() && canAccessSchool(schoolId) && 
+         request.resource.data.createdBy == resource.data.createdBy);
+      allow delete: if isSuperadmin();
+    }
+    
+    // Classes collection - users can read classes for schools they access or for approved schools (onboarding)
+    match /classes/{classId} {
+      allow read: if isAuthenticated() && resource.data.school_id != null && (
+        canAccessSchool(resource.data.school_id) || 
+        get(/databases/$(database)/documents/schools/$(resource.data.school_id)).data.approvalStatus == 'approved' ||
+        // Allow teachers to read classes where they are in teacher_ids (even if they don't have school_id yet)
+        (getUserRole() == 'teacher' && 
+         resource.data.teacher_ids != null && 
+         resource.data.teacher_ids.hasAny([request.auth.uid])) ||
+        // Allow teachers to read classes shared with them
+        (getUserRole() == 'teacher' && 
+         resource.data.shared_with_teachers != null && 
+         resource.data.shared_with_teachers.hasAny([request.auth.uid]))
+      );
+      allow create: if isAdminOrSuperadmin() || 
+        (isAuthenticated() && 
+         request.resource.data.school_id != null && 
+         canAccessSchool(request.resource.data.school_id) &&
+         request.resource.data.createdBy == request.auth.uid);
+      allow update: if isAdminOrSuperadmin() || 
+        // School admins/principals can update teacher_ids, class_teacher_id, and student_ids for classes in their school
+        (isAuthenticated() && 
+         resource.data.school_id != null && 
+         canAccessSchool(resource.data.school_id) &&
+         request.resource.data.school_id == resource.data.school_id &&
+         (getUserRole() == 'school' || getUserRole() == 'principal') && 
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['teacher_ids', 'class_teacher_id', 'student_ids', 'updatedAt'])) ||
+        // Teachers in the same school can update student_ids, teacher_ids, class_teacher_id, and shared_with_teachers
+        // This allows teachers to assign students to classes, become class teachers, and share classes with other teachers
+        (isAuthenticated() && 
+         resource.data.school_id != null && 
+         getUserRole() == 'teacher' &&
+         // Teacher must be in the same school as the class
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id != null &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == resource.data.school_id &&
+         request.resource.data.school_id == resource.data.school_id &&
+         // Teacher must be managing the class (in teacher_ids) to update it
+         resource.data.teacher_ids != null &&
+         resource.data.teacher_ids.hasAny([request.auth.uid]) &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['student_ids', 'teacher_ids', 'class_teacher_id', 'shared_with_teachers', 'updatedAt']) &&
+         // If updating class_teacher_id, must be setting it to themselves
+         (request.resource.data.class_teacher_id == null || 
+          request.resource.data.class_teacher_id == request.auth.uid ||
+          resource.data.class_teacher_id == request.auth.uid) &&
+         // If updating teacher_ids, must include themselves
+         (request.resource.data.teacher_ids == null ||
+          request.resource.data.teacher_ids.hasAny([request.auth.uid]))) ||
+        // Students can update their own student_ids
+        (isAuthenticated() && resource.data.school_id != null && request.resource.data.school_id == resource.data.school_id &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['student_ids', 'updatedAt']) &&
+         request.resource.data.student_ids.hasAny([request.auth.uid]));
+      allow delete: if isAdminOrSuperadmin() || 
+        (isAuthenticated() && 
+         resource.data.school_id != null && 
+         canAccessSchool(resource.data.school_id));
+    }
+    
+    // Class sessions - teacher starts session for a class; students join by code; teacher launches lesson/scene
+    // Helper: teacher can manage this class (in teacher_ids or shared_with_teachers)
+    function teacherManagesClass(classId) {
+      return isAuthenticated() && getUserRole() == 'teacher' &&
+        exists(/databases/$(database)/documents/classes/$(classId)) &&
+        (
+          (get(/databases/$(database)/documents/classes/$(classId)).data.teacher_ids != null &&
+           get(/databases/$(database)/documents/classes/$(classId)).data.teacher_ids.hasAny([request.auth.uid])) ||
+          (get(/databases/$(database)/documents/classes/$(classId)).data.shared_with_teachers != null &&
+           get(/databases/$(database)/documents/classes/$(classId)).data.shared_with_teachers.hasAny([request.auth.uid]))
+        );
+    }
+    // Helper: student is in this class - allow if user.class_ids contains classId OR class.student_ids contains student
+    function studentInClass(classId, schoolId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        getUserRole() == 'student' &&
+        exists(/databases/$(database)/documents/classes/$(classId)) &&
+        get(/databases/$(database)/documents/classes/$(classId)).data.school_id == schoolId &&
+        (
+          (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == schoolId &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.class_ids != null &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.class_ids.hasAny([classId])) ||
+          (get(/databases/$(database)/documents/classes/$(classId)).data.student_ids != null &&
+           get(/databases/$(database)/documents/classes/$(classId)).data.student_ids.hasAny([request.auth.uid]))
+        );
+    }
+    // Helper: authenticated student in same school (session code is the secret; client still checks class membership)
+    function studentSameSchool(sessionSchoolId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        getUserRole() == 'student' &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id != null &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == sessionSchoolId;
+    }
+    match /class_sessions/{sessionId} {
+      allow create: if isAuthenticated() &&
+        request.resource.data.teacher_uid == request.auth.uid &&
+        request.resource.data.school_id != null &&
+        request.resource.data.class_id != null &&
+        request.resource.data.status == 'waiting' &&
+        request.resource.data.session_code != null &&
+        teacherManagesClass(request.resource.data.class_id) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == request.resource.data.school_id;
+      allow read: if isAuthenticated() && (
+        resource.data.teacher_uid == request.auth.uid ||
+        studentInClass(resource.data.class_id, resource.data.school_id) ||
+        studentSameSchool(resource.data.school_id) ||
+        isAdminOrSuperadmin()
+      );
+      // Teacher (session owner) may update: status, launched_lesson, launched_scene, teacher_view, updated_at only.
+      // Explicitly allow teacher_view + updated_at for view sync; other keys for launch/end.
+      allow update: if isAuthenticated() && (
+        isAdminOrSuperadmin() ||
+        (resource.data.teacher_uid == request.auth.uid &&
+         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['teacher_view', 'updated_at']) ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'launched_lesson', 'launched_scene', 'updated_at']) ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'launched_lesson', 'launched_scene', 'teacher_view', 'updated_at'])))
+      );
+      allow delete: if isAuthenticated() && (
+        resource.data.teacher_uid == request.auth.uid ||
+        isAdminOrSuperadmin()
+      );
+      // Progress subcollection: each student writes their own doc; teacher reads all
+      match /progress/{studentUid} {
+        allow read: if isAuthenticated() && (
+          get(/databases/$(database)/documents/class_sessions/$(sessionId)).data.teacher_uid == request.auth.uid ||
+          request.auth.uid == studentUid ||
+          isAdminOrSuperadmin()
+        );
+        allow create, update: if isAuthenticated() &&
+          request.auth.uid == studentUid &&
+          request.resource.data.student_uid == request.auth.uid &&
+          exists(/databases/$(database)/documents/class_sessions/$(sessionId)) &&
+          studentInClass(get(/databases/$(database)/documents/class_sessions/$(sessionId)).data.class_id, get(/databases/$(database)/documents/class_sessions/$(sessionId)).data.school_id);
+        allow delete: if false;
+      }
+    }
+    
+    // Lesson launches - students can write own, teachers/principals can read their students
+    match /lesson_launches/{launchId} {
+      allow read: if isAuthenticated() && (
+        resource.data.student_id == request.auth.uid ||
+        isSuperadmin() ||
+        isAdmin() ||
+        // Teachers can read launches for students in their school and classes (managed or shared)
+        (getUserRole() == 'teacher' && 
+         resource.data.school_id != null &&
+         resource.data.class_id != null &&
+         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == resource.data.school_id &&
+         exists(/databases/$(database)/documents/classes/$(resource.data.class_id)) &&
+         (
+           // Check if teacher manages the class
+           (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids != null &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids.hasAny([resource.data.class_id])) ||
+           // OR check if class is shared with the teacher
+           (get(/databases/$(database)/documents/classes/$(resource.data.class_id)).data.shared_with_teachers != null &&
+            get(/databases/$(database)/documents/classes/$(resource.data.class_id)).data.shared_with_teachers.hasAny([request.auth.uid]))
+         )) ||
+        // Principals can read launches for students in their school
+        (getUserRole() == 'principal' && 
+         resource.data.school_id != null &&
+         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id == resource.data.school_id) ||
+        // School admins can read launches for students in their school
+        (getUserRole() == 'school' && 
+         resource.data.school_id != null &&
+         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == resource.data.school_id) ||
+        // Fallback: use canAccessStudent for other cases
+        canAccessStudent(resource.data.student_id, resource.data.school_id)
+      );
+      allow create: if isAuthenticated() && 
+        request.resource.data.student_id == request.auth.uid;
+      allow update: if isAuthenticated() && 
+        resource.data.student_id == request.auth.uid;
+      allow delete: if isAdminOrSuperadmin();
+    }
+    
+    // Student scores - students can read own, teachers/principals can read their students
+    match /student_scores/{scoreId} {
+      allow read: if isAuthenticated() && (
+        resource.data.student_id == request.auth.uid ||
+        isSuperadmin() ||
+        isAdmin() ||
+        // Teachers can read scores for students in their school and classes (managed or shared)
+        (getUserRole() == 'teacher' && 
+         resource.data.school_id != null &&
+         resource.data.class_id != null &&
+         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == resource.data.school_id &&
+         exists(/databases/$(database)/documents/classes/$(resource.data.class_id)) &&
+         (
+           // Check if teacher manages the class
+           (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids != null &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_class_ids.hasAny([resource.data.class_id])) ||
+           // OR check if class is shared with the teacher
+           (get(/databases/$(database)/documents/classes/$(resource.data.class_id)).data.shared_with_teachers != null &&
+            get(/databases/$(database)/documents/classes/$(resource.data.class_id)).data.shared_with_teachers.hasAny([request.auth.uid]))
+         )) ||
+        // Principals can read scores for students in their school
+        (getUserRole() == 'principal' && 
+         resource.data.school_id != null &&
+         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id == resource.data.school_id) ||
+        // School admins can read scores for students in their school
+        (getUserRole() == 'school' && 
+         resource.data.school_id != null &&
+         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == resource.data.school_id) ||
+        // Fallback: use canAccessStudent for other cases
+        canAccessStudent(resource.data.student_id, resource.data.school_id)
+      );
+      allow create: if isAuthenticated() && 
+        request.resource.data.student_id == request.auth.uid;
+      allow update: if isAuthenticated() && 
+        resource.data.student_id == request.auth.uid;
+      allow delete: if isAdminOrSuperadmin();
+    }
+    
+    // Legacy collections - maintain backward compatibility with school_id scoping
+    // User lesson progress (legacy - will be migrated to lesson_launches)
+    match /user_lesson_progress/{progressId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        (resource.data.school_id != null && canAccessStudent(resource.data.userId, resource.data.school_id))
+      );
+      allow create, update: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid;
+      allow delete: if isAdminOrSuperadmin();
+    }
+    
+    // User quiz results (legacy - will be migrated to student_scores)
+    match /user_quiz_results/{resultId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        (resource.data.school_id != null && canAccessStudent(resource.data.userId, resource.data.school_id))
+      );
+      allow create, update: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid;
+      allow delete: if isAdminOrSuperadmin();
+    }
+    
+    // Curriculum change requests - schools request; Super Admin approves/rejects
+    match /curriculum_change_requests/{requestId} {
+      // School/principal can read requests for their school; admin/superadmin can read all
+      allow read: if isAuthenticated() && (
+        isAdminOrSuperadmin() ||
+        (getUserRole() == 'school' && resource.data.school_id == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id) ||
+        (getUserRole() == 'principal' && resource.data.school_id == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id)
+      );
+      // School/principal can create requests for their school
+      allow create: if isAuthenticated() && 
+        (getUserRole() == 'school' || getUserRole() == 'principal') &&
+        request.resource.data.school_id != null &&
+        ((getUserRole() == 'school' && request.resource.data.school_id == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id) ||
+         (getUserRole() == 'principal' && request.resource.data.school_id == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id)) &&
+        request.resource.data.requested_by == request.auth.uid;
+      // Only admin/superadmin can update (approve/reject)
+      allow update: if isAdminOrSuperadmin();
+      allow delete: if false;
+    }
+    
+    // Sales Funnel (anonymous users signed in via client) - store runs + request/response logs
+    match /salesFunnelRuns/{runId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow delete: if isAdminOrSuperadmin();
+    }
+    
+    match /salesFunnelLogs/{logId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow delete: if isAdminOrSuperadmin();
+    }
+    
+    // Production logs - for debugging and monitoring
+    match /production_logs/{logId} {
+      // Allow create from any client (including unauthenticated) so error-boundary and
+      // pre-login errors (e.g. on /login) are captured; read remains admin-only.
+      allow create: if true;
+      // Admin and superadmin can read logs (for the admin UI)
+      allow read: if isAdminOrSuperadmin();
+      // No updates or deletes allowed (logs are immutable)
+      allow update, delete: if false;
+    }
+  }
+} 

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, Navigate, Route, Routes } from 'react-router-dom';
 import {
   canPollExecution,
   ExecutionStatus,
@@ -18,6 +19,7 @@ import { Textarea } from './components/ui/textarea';
 import { Label } from './components/ui/label';
 import { Select } from './components/ui/select';
 import { JsonView } from './components/JsonView';
+import SalesFunnelPage from './pages/SalesFunnelPage';
 
 type StepState = 'pending' | 'running' | 'done' | 'error';
 
@@ -52,7 +54,7 @@ const NODE_TO_STEP: Partial<Record<string, PipelineStepId>> = {
   'Save to Firebase & Sheets': 'save'
 };
 
-const App: React.FC = () => {
+const LessonBuilderPage: React.FC = () => {
   const [pdfFiles, setPdfFiles] = useState<File[]>([]);
   const [currentFileIndex, setCurrentFileIndex] = useState<number>(-1);
   const [isBatchMode, setIsBatchMode] = useState<boolean>(false);
@@ -81,6 +83,15 @@ const App: React.FC = () => {
   const rotateRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);  
   const execRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const RECENT_EXECUTIONS_TOGGLE_KEY = 'learnxr_show_recent_executions';
+  const [showRecentExecutions, setShowRecentExecutions] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(RECENT_EXECUTIONS_TOGGLE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
 
   const extractErrorMessage = useCallback((data: unknown): string | null => {
     if (!data || typeof data !== 'object') return null;
@@ -112,21 +123,40 @@ const App: React.FC = () => {
     () => Boolean(import.meta.env.VITE_N8N_WEBHOOK_URL),
     []
   );
+  const n8nWorkflowId = useMemo(
+    () => (import.meta.env.VITE_N8N_WORKFLOW_ID ? String(import.meta.env.VITE_N8N_WORKFLOW_ID) : null),
+    []
+  );
 
   useEffect(() => {
     const loadExecutions = async () => {
-      const list = await listExecutions(20);
+      const list = await listExecutions(10, n8nWorkflowId);
       if (list && Array.isArray(list)) {
         setRecentExecutions(list);
+      } else {
+        setRecentExecutions([]);
       }
     };
-    loadExecutions();
-    // Auto-refresh every 30 s
+
+    // Budget mode: stop polling when toggle is OFF.
+    if (!showRecentExecutions || !n8nConfigured) {
+      if (execRefreshRef.current) clearInterval(execRefreshRef.current);
+      execRefreshRef.current = null;
+      setRecentExecutions([]);
+      setSelectedExecId(null);
+      setSelectedNodeId(null);
+      return;
+    }
+
+    void loadExecutions();
+    // Auto-refresh every 30 s (only when toggle is ON)
     execRefreshRef.current = setInterval(loadExecutions, 30_000);
+
     return () => {
       if (execRefreshRef.current) clearInterval(execRefreshRef.current);
+      execRefreshRef.current = null;
     };
-  }, []);
+  }, [showRecentExecutions, n8nConfigured, n8nWorkflowId]);
 
   const handleSelectExecution = useCallback(async (id: string) => {
     if (selectedExecId === id) {
@@ -554,24 +584,32 @@ const App: React.FC = () => {
                 through n8n.
               </p>
             </div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-slate-700/80 bg-slate-900/90 px-3.5 py-1.5 text-[11px] text-slate-200 shadow-sm">
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  status === 'idle'
-                    ? 'bg-slate-500'
-                    : status === 'running'
-                    ? 'bg-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.9)]'
-                    : status === 'success'
-                    ? 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.9)]'
-                    : 'bg-rose-400 shadow-[0_0_12px_rgba(248,113,113,0.9)]'
-                }`}
-              />
-              <span className="font-medium tracking-tight">
-                {status === 'idle' && 'Idle'}
-                {status === 'running' && 'Running…'}
-                {status === 'success' && 'Last run: success'}
-                {status === 'error' && 'Last run: error'}
-              </span>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Link
+                to="/sales-funnel"
+                className="inline-flex items-center justify-center rounded-full border border-slate-700/80 bg-slate-900/60 px-3.5 py-1.5 text-[11px] text-slate-200 shadow-sm transition-colors hover:bg-slate-900/90"
+              >
+                Sales Funnel
+              </Link>
+              <div className="inline-flex items-center gap-2 rounded-full border border-slate-700/80 bg-slate-900/90 px-3.5 py-1.5 text-[11px] text-slate-200 shadow-sm">
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    status === 'idle'
+                      ? 'bg-slate-500'
+                      : status === 'running'
+                      ? 'bg-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.9)]'
+                      : status === 'success'
+                      ? 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.9)]'
+                      : 'bg-rose-400 shadow-[0_0_12px_rgba(248,113,113,0.9)]'
+                  }`}
+                />
+                <span className="font-medium tracking-tight">
+                  {status === 'idle' && 'Idle'}
+                  {status === 'running' && 'Running…'}
+                  {status === 'success' && 'Last run: success'}
+                  {status === 'error' && 'Last run: error'}
+                </span>
+              </div>
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-slate-400">
@@ -883,15 +921,40 @@ const App: React.FC = () => {
             <CardHeader>
               <CardTitle>Execution & error logs</CardTitle>
               <CardDescription>
-                Click any execution to see its node-by-node logs. Refreshes every 30 s.
+                Click any execution to see its node-by-node logs. When auto-refresh is ON, it refreshes every 30 s.
               </CardDescription>
             </CardHeader>
             <CardContent>
 
               {/* ── Recent executions list ── */}
-              {recentExecutions.length > 0 ? (
-                <div className="mb-4 space-y-1.5 text-[11px]">
-                  <p className="font-medium text-slate-400">Recent executions — click to expand logs</p>
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <p className="font-medium text-[11px] text-slate-400">
+                  Recent executions
+                  <span className="ml-2 text-slate-500">
+                    {showRecentExecutions ? '— auto-refresh ON' : '— auto-refresh OFF'}
+                  </span>
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !showRecentExecutions;
+                    try {
+                      localStorage.setItem(RECENT_EXECUTIONS_TOGGLE_KEY, String(next));
+                    } catch {
+                      // ignore
+                    }
+                    setShowRecentExecutions(next);
+                  }}
+                  className="rounded-full border border-slate-700/80 bg-slate-900/60 px-3 py-1 text-[11px] text-slate-200 shadow-sm transition-colors hover:bg-slate-900/90"
+                >
+                  {showRecentExecutions ? 'Turn off' : 'Turn on'}
+                </button>
+              </div>
+
+              {showRecentExecutions ? (
+                recentExecutions.length > 0 ? (
+                  <div className="space-y-1.5 text-[11px]">
+                    <p className="font-medium text-slate-400">click to expand logs</p>
                   <ul className="space-y-1">
                     {recentExecutions.map((exec) => {
                       const isSelected = selectedExecId === exec.id;
@@ -1072,10 +1135,15 @@ const App: React.FC = () => {
                       );
                     })}
                   </ul>
-                </div>
+                  </div>
+                ) : (
+                  <div className="mb-4 rounded-xl border border-dashed border-slate-700/80 bg-slate-950/50 px-4 py-3 text-[11px] text-slate-400">
+                    No recent executions found. Ensure the n8n API is configured.
+                  </div>
+                )
               ) : (
                 <div className="mb-4 rounded-xl border border-dashed border-slate-700/80 bg-slate-950/50 px-4 py-3 text-[11px] text-slate-400">
-                  No recent executions found. Ensure the n8n API is configured.
+                  Auto-refresh is OFF. Turn it on to load recent executions.
                 </div>
               )}
 
@@ -1160,6 +1228,16 @@ const App: React.FC = () => {
         </section>
       </div>
     </div>
+  );
+};
+
+const App: React.FC = () => {
+  return (
+    <Routes>
+      <Route path="/" element={<LessonBuilderPage />} />
+      <Route path="/sales-funnel" element={<SalesFunnelPage />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 };
 

@@ -1,0 +1,490 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "api_keys",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "userId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "assessment_attempts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "assessmentId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "completedAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "assessment_attempts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "studentId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "completedAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "assessments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "classId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "updatedAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "class_sessions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "session_code",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "curriculum_chapters",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "curriculum",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "class",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subject",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "curriculum_chapters",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "curriculum",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "class",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subject",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "chapter_number",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "lesson_launches",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "class_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "school_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "launched_at",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "lesson_launches",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "student_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "completion_status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "lesson_versions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "chapterId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "topicId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "versionNumber",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "lesson_versions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "chapterId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "versionNumber",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "schools",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "approvalStatus",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "schoolCode",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "skyboxes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "curriculum",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "class",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "skyboxes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "curriculum",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "class",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "subject",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "skyboxes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "userId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "skyboxes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "userId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "skyboxes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "userId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "student_scores",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "class_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "school_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "completed_at",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "student_scores",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "student_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "completed_at",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "subscriptions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "userId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "versions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "topicId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "version_number",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "salesFunnelRuns",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "userId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "salesFunnelLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "userId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "DESCENDING"
+        }
+      ],
+      "density": "SPARSE_ALL"
+    }
+  ],
+  "fieldOverrides": []
+}
