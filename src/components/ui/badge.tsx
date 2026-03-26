@@ -11,7 +11,8 @@ const badgeVariants = cva(
         secondary: 'border-border bg-slate-800/50 text-slate-200',
         success: 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300',
         danger: 'border-rose-500/70 bg-rose-500/10 text-rose-200',
-        warning: 'border-amber-500/60 bg-amber-500/10 text-amber-200'
+        warning: 'border-amber-500/60 bg-amber-500/10 text-amber-200',
+        outline: 'border-white/10 bg-transparent text-slate-300'
       }
     },
     defaultVariants: {
@@ -21,7 +22,7 @@ const badgeVariants = cva(
 );
 
 export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
-  variant?: 'default' | 'secondary' | 'success' | 'danger' | 'warning';
+  variant?: 'default' | 'secondary' | 'success' | 'danger' | 'warning' | 'outline';
 }
 
 export const Badge = ({ className, variant, ...props }: BadgeProps) => {

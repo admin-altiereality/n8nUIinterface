@@ -7,7 +7,9 @@
     "upload:server": "node src/index.js",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint \"src/**/*.{ts,tsx}\""
+    "lint": "eslint \"src/**/*.{ts,tsx}\"",
+    "twilio:messages": "twilio api:core:messages:list --properties sid,status,direction,from,to,dateSent,body",
+    "firebase:secrets:twilio": "node scripts/push-twilio-secrets.cjs"
   },
   "dependencies": {
     "autoprefixer": "^10.4.27",

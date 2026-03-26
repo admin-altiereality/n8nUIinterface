@@ -9,6 +9,11 @@ dist/
 .env.local
 .env.*.local
 
+# Firebase Functions local / deploy params (may contain Twilio defaults)
+functions/.env
+
+.tmp-twilio-secret-*
+
 # Editor / OS
 .DS_Store
 *.log

@@ -1,6 +1,7 @@
 import { getApps, initializeApp, type FirebaseApp } from 'firebase/app';
 import { getAuth, signInAnonymously, type User } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
+import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 type FirebaseConfig = {
   apiKey: string;
@@ -80,5 +81,32 @@ export async function ensureSignedInAnonymously(): Promise<User | null> {
   })();
 
   return signInPromise;
+}
+
+export async function uploadTwilioMediaToStorage(file: File, opts?: { pathPrefix?: string }): Promise<{
+  downloadUrl: string;
+  storagePath: string;
+}> {
+  if (!isFirebaseConfigured()) {
+    throw new Error('Firebase is not configured. Add VITE_FIREBASE_* env vars to enable media uploads.');
+  }
+
+  // Ensure auth exists (helps when Storage rules require authenticated users).
+  const user = await ensureSignedInAnonymously();
+  const app = getOrCreateFirebaseApp();
+  const storage = getStorage(app);
+
+  const prefix = opts?.pathPrefix || 'twilio-media';
+  const uid = user?.uid || 'anon';
+  const safeName = String(file.name || 'upload').replace(/[^\w.\-]+/g, '_');
+  const storagePath = `${prefix}/${uid}/${Date.now()}-${safeName}`;
+
+  const storageRef = ref(storage, storagePath);
+  const metadata = file.type ? { contentType: file.type } : undefined;
+
+  await uploadBytes(storageRef, file, metadata);
+  const downloadUrl = await getDownloadURL(storageRef);
+
+  return { downloadUrl, storagePath };
 }
 

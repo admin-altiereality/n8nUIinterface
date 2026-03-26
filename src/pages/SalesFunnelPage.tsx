@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, CheckCircle2, CircleAlert, Clock3, Workflow } from 'lucide-react';
+import { Activity, CheckCircle2, CircleAlert, Clock3, Workflow, Target, Cpu, History as HistoryIcon, LogOut, User, ShieldCheck } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -224,7 +225,7 @@ export default function SalesFunnelPage() {
     setSubmitting(true);
     setStatus({ text: 'Submitting', kind: '' });
 
-    const payload = {
+    const payload: { city: string; queryPrefix: string; startedAt: string; query?: string } = {
       city: city.trim(),
       queryPrefix: queryPrefix.trim() || 'CBSE schools in',
       startedAt: new Date().toISOString()
@@ -335,276 +336,218 @@ export default function SalesFunnelPage() {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  const { user, logout } = useAuth();
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-50">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-4 py-6 md:px-6">
-        <header className="flex flex-col justify-between gap-3 rounded-xl border border-border/70 bg-card/60 p-5 backdrop-blur md:flex-row md:items-start">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-              n8n Workflow UI
-            </p>
-            <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
-              Data Scrap + Email + WhatsApp Sales Funnel
-            </h1>
-            <p className="text-sm text-slate-400">
-              Direct interface for workflow <span className="rounded-full border border-border bg-slate-900/50 px-2 py-0.5 font-mono text-xs">bJQC23r5at0P8qdA</span>
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Link
-              to="/"
-              className="inline-flex items-center justify-center rounded-full border border-slate-700/80 bg-slate-900/60 px-3 py-1.5 text-[11px] text-slate-200 shadow-sm transition-colors hover:bg-slate-900/90"
-            >
-              Lesson Builder
-            </Link>
-            <Badge
-              variant={status.kind === 'ok' ? 'success' : status.kind === 'warn' ? 'warning' : 'secondary'}
-              className="shrink-0"
-            >
-              {status.text}
-            </Badge>
+    <div className="min-h-screen bg-transparent text-slate-100 selection:bg-emerald-500/30">
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+        
+        {/* Header */}
+        <header className="glass-card mb-8 rounded-3xl p-6 lg:p-8 animate-fade-in">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-3">
+              <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
+                <ShieldCheck className="size-3" />
+                {user?.role === 'superadmin' ? 'Super Admin' : 'Sales Lead'}
+              </div>
+              <h1 className="text-gradient-emerald text-3xl font-bold tracking-tight sm:text-4xl lg:text-5xl">
+                Sales Funnel
+              </h1>
+              <div className="flex items-center gap-2 text-xs text-slate-500 font-medium">
+                <User className="size-3 text-emerald-400" />
+                <span>Logged in as <span className="text-slate-300">{user?.name}</span></span>
+              </div>
+            </div>
+            
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="glass-card flex items-center gap-3 rounded-2xl px-4 py-2 text-xs font-medium mr-4">
+                <div className={`h-2.5 w-2.5 rounded-full ring-4 ${
+                  (typeof status === 'string' && status === 'running') ? 'bg-emerald-400 animate-pulse ring-emerald-400/20' :
+                  ((typeof status === 'string' && status === 'success') || (typeof status !== 'string' && status.kind === 'ok')) ? 'bg-emerald-400 ring-emerald-400/20' :
+                  ((typeof status === 'string' && status === 'idle') || (typeof status !== 'string' && status.kind === '')) ? 'bg-slate-500 ring-slate-500/20' :
+                  'bg-rose-400 ring-rose-400/20'
+                }`} />
+                <span className="text-slate-200 uppercase tracking-widest text-[10px] font-black">
+                  {typeof status === 'string' ? status : status.text}
+                </span>
+              </div>
+              
+              {user?.role === 'superadmin' && (
+                <>
+                  <Link to="/" className="glass-card rounded-2xl px-5 py-2.5 text-xs font-semibold text-slate-200 hover:bg-white/5 transition-all">
+                    Builder
+                  </Link>
+                  <Link to="/twilio-messaging" className="glass-card border-rose-500/10 bg-rose-500/5 rounded-2xl px-5 py-2.5 text-xs font-semibold text-rose-100 hover:bg-rose-500/10 transition-all">
+                    Messaging
+                  </Link>
+                </>
+              )}
+
+              <Button 
+                variant="ghost" 
+                onClick={logout}
+                className="rounded-2xl px-4 py-2.5 text-xs font-bold text-rose-500 hover:bg-rose-500/10 transition-all flex items-center gap-2 border border-rose-500/10"
+              >
+                <LogOut className="size-3" /> Sign Out
+              </Button>
+            </div>
           </div>
         </header>
 
-        <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <Card>
-            <CardContent className="p-4">
-              <p className="text-xs text-slate-400">Last 5 runs</p>
-              <p className="mt-1 text-2xl font-bold">{executions.length}</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <p className="text-xs text-slate-400">Success</p>
-              <p className="mt-1 flex items-center gap-2 text-2xl font-bold text-emerald-400">
-                <CheckCircle2 className="size-4" /> {successCount}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <p className="text-xs text-slate-400">Error</p>
-              <p className="mt-1 flex items-center gap-2 text-2xl font-bold text-rose-400">
-                <CircleAlert className="size-4" /> {errorCount}
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <p className="text-xs text-slate-400">Latest run</p>
-              <p className="mt-1 flex items-center gap-2 text-lg font-semibold">
-                <Activity className="size-4 text-indigo-300" /> #{latestRun?.id || '-'}
-              </p>
-            </CardContent>
-          </Card>
-        </section>
-
-        <div className="grid gap-4 lg:grid-cols-5">
-          <Card className="lg:col-span-2">
-            <CardHeader>
-              <CardTitle>Run Endpoint</CardTitle>
-              <CardDescription>Choose environment and save webhook URL.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="space-y-2">
-                <Label htmlFor="endpointMode" className="text-[11px] text-slate-400">
-                  Environment
-                </Label>
-                <Select
-                  id="endpointMode"
-                  value={mode}
-                  onChange={(e) => onModeChange(e.target.value as Mode)}
-                >
-                  <option value="test">Test URL</option>
-                  <option value="production">Production URL</option>
-                  <option value="custom">Custom</option>
-                </Select>
+        {/* Stats Grid */}
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+           <div className="glass-card p-5 rounded-3xl animate-fade-in [animation-delay:100ms]">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] uppercase tracking-wider text-slate-500">Total Runs</p>
+                <div className="p-1.5 bg-emerald-500/10 rounded-lg text-emerald-400"><Activity className="size-4" /></div>
               </div>
-
-              <div className="space-y-2 pt-1">
-                <Label htmlFor="webhookUrl" className="text-[11px] text-slate-400">
-                  Start URL
-                </Label>
-                <Input
-                  id="webhookUrl"
-                  type="url"
-                  value={webhookUrl}
-                  onChange={(e) => setWebhookUrl(e.target.value)}
-                />
+              <p className="text-3xl font-bold font-heading text-slate-100">{executions.length}</p>
+           </div>
+           <div className="glass-card p-5 rounded-3xl animate-fade-in [animation-delay:150ms]">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] uppercase tracking-wider text-slate-500">Conversions</p>
+                <div className="p-1.5 bg-emerald-500/10 rounded-lg text-emerald-400"><CheckCircle2 className="size-4" /></div>
               </div>
-
-              <Button type="button" variant="secondary" className="mt-1 w-full" onClick={onSaveStartUrl}>
-                Save Start URL
-              </Button>
-              <p className="text-xs text-slate-400">
-                Sends GET params: <span className="font-mono">city, queryPrefix, query, startedAt</span>
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card className="lg:col-span-3">
-            <CardHeader>
-              <CardTitle>Execution & error logs</CardTitle>
-              <CardDescription>Inspect node-by-node logs for each execution.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2">
-                {!executions.length && (
-                  <p className="text-sm text-slate-400">No execution records yet.</p>
-                )}
-                {executions.map((run, idx) => (
-                  <details
-                    key={run.id}
-                    className="rounded-lg border border-slate-800/70 bg-slate-900/50 overflow-hidden"
-                    open={idx === 0}
-                  >
-                    <summary className="cursor-pointer list-none flex w-full items-center justify-between gap-2 px-3 py-2 hover:bg-slate-800/40">
-                      <div className="space-y-0.5">
-                        <p className="font-medium text-slate-50">#{run.id}</p>
-                        <p className="text-xs text-slate-400">
-                          Finished:{' '}
-                          {run.stoppedAt ? new Date(run.stoppedAt).toLocaleString() : '-'}
-                        </p>
-                      </div>
-                      <Badge variant={runBadge(run.status)}>{toPillLabel(run.status)}</Badge>
-                    </summary>
-                    <div className="mt-2 px-3 pb-3">
-                      <div className="space-y-2 rounded-md border border-slate-800/60 bg-slate-950/30 p-2">
-                        {run.nodes.map((node) => (
-                          <div
-                            key={`${run.id}-${node.name}`}
-                            className="flex items-start justify-between gap-3 rounded-md border border-slate-800/60 bg-slate-950/30 p-3"
-                          >
-                            <div>
-                              <p className="text-sm font-medium text-slate-50">{node.name}</p>
-                              <p className="mt-1 text-xs text-slate-400">
-                                {run.startedAt ? new Date(run.startedAt).toLocaleString() : '-'} • {node.executionTime} ms
-                              </p>
-                              <p className="text-xs text-slate-400">
-                                {node.itemsInput} in / {node.itemsOutput} out
-                              </p>
-                            </div>
-                            <Badge variant={nodeBadgeVariant(node.status)}>{nodeBadgeLabel(node.status)}</Badge>
-                          </div>
-                        ))}
-                        {!run.nodes.length && (
-                          <p className="text-xs text-slate-400">No node-level logs available.</p>
-                        )}
-                      </div>
-                    </div>
-                  </details>
-                ))}
+              <p className="text-3xl font-bold font-heading text-emerald-400">{successCount}</p>
+           </div>
+           <div className="glass-card p-5 rounded-3xl animate-fade-in [animation-delay:200ms]">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] uppercase tracking-wider text-slate-500">Anomalies</p>
+                <div className="p-1.5 bg-rose-500/10 rounded-lg text-rose-400"><CircleAlert className="size-4" /></div>
               </div>
-            </CardContent>
-          </Card>
+              <p className="text-3xl font-bold font-heading text-rose-400">{errorCount}</p>
+           </div>
+           <div className="glass-card p-5 rounded-3xl animate-fade-in [animation-delay:250ms]">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] uppercase tracking-wider text-slate-500">Latest Active</p>
+                <div className="p-1.5 bg-indigo-500/10 rounded-lg text-indigo-400"><Target className="size-4" /></div>
+              </div>
+              <p className="text-lg font-bold font-heading text-indigo-100 truncate">#{latestRun?.id || '-'}</p>
+           </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle>Start Scraping by City</CardTitle>
-              <CardDescription>Enter city and start the workflow run.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={onSubmit} noValidate className="space-y-3">
-                <div className="grid gap-3 sm:grid-cols-2">
+        {/* Bento Grid layout */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:grid-rows-[auto_auto]">
+          
+          {/* Main Controls - Left */}
+          <div className="lg:col-span-12 grid gap-6 lg:grid-cols-2">
+            
+            {/* Campaign Config */}
+            <div className="glass-card p-6 rounded-3xl animate-fade-in [animation-delay:300ms]">
+              <div className="mb-6 flex items-center justify-between">
+                <h3 className="font-heading text-lg font-semibold text-emerald-100">Launch Campaign</h3>
+                <Cpu className="size-5 text-emerald-400/50" />
+              </div>
+              <form onSubmit={onSubmit} noValidate className="space-y-6">
+                <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label htmlFor="city" className="text-[11px] text-slate-400">
-                      City Name *
-                    </Label>
-                    <Input
-                      id="city"
-                      name="city"
-                      value={city}
-                      onChange={(e) => setCity(e.target.value)}
-                      required
-                      placeholder="Rajsamand"
-                      disabled={submitting}
+                    <Label className="text-[10px] uppercase tracking-wider text-slate-500">Target Region</Label>
+                    <Input 
+                      value={city} 
+                      onChange={(e) => setCity(e.target.value)} 
+                      placeholder="e.g. New York, Mumbai" 
+                      className="h-11 bg-slate-950/50 border-white/5 rounded-xl focus:ring-emerald-500/20"
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="queryPrefix" className="text-[11px] text-slate-400">
-                      Search Query Prefix
-                    </Label>
-                    <Input
-                      id="queryPrefix"
-                      name="queryPrefix"
-                      value={queryPrefix}
-                      onChange={(e) => setQueryPrefix(e.target.value)}
-                      placeholder="CBSE schools in"
-                      disabled={submitting}
+                    <Label className="text-[10px] uppercase tracking-wider text-slate-500">Business Niche</Label>
+                    <Input 
+                      value={queryPrefix} 
+                      onChange={(e) => setQueryPrefix(e.target.value)} 
+                      placeholder="e.g. Dental Clinics" 
+                      className="h-11 bg-slate-950/50 border-white/5 rounded-xl focus:ring-emerald-500/20"
                     />
                   </div>
                 </div>
-                <div className="flex gap-2">
-                  <Button type="submit" className="flex-1" disabled={submitting}>
-                    <Workflow className="size-4" />
-                    {submitting ? 'Starting...' : 'Start Workflow'}
-                  </Button>
-                  <Button type="button" variant="outline" onClick={onReset} disabled={submitting}>
-                    Reset
-                  </Button>
+                <div className="flex gap-3">
+                   <Button type="submit" disabled={submitting} className="flex-1 h-12 bg-emerald-600 hover:bg-emerald-500 rounded-2xl font-bold shadow-lg shadow-emerald-600/20 transition-all active:scale-[0.98]">
+                      {submitting ? 'Initializing...' : 'Run Pipeline'}
+                      <Workflow className="ml-2 size-4" />
+                   </Button>
+                   <Button type="button" variant="outline" onClick={onReset} className="px-6 rounded-2xl h-12 border-white/5 hover:bg-white/5">
+                      Reset
+                   </Button>
                 </div>
               </form>
-            </CardContent>
-          </Card>
+            </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Latest Submission</CardTitle>
-              <CardDescription>Raw request/response diagnostics.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <pre className="max-h-56 overflow-auto rounded-md border border-slate-800/60 bg-slate-900/30 p-3 text-xs text-slate-200">
-                {resultText}
-              </pre>
-            </CardContent>
-          </Card>
-        </div>
+            {/* Diagnostics */}
+            <div className="glass-card p-6 rounded-3xl animate-fade-in [animation-delay:350ms]">
+              <h3 className="font-heading text-lg font-semibold text-emerald-100 mb-5">Live Diagnostics</h3>
+              <div className="rounded-2xl border border-white/5 bg-slate-950/80 p-4 font-mono text-[11px] leading-relaxed text-emerald-400/90 h-[120px] overflow-auto">
+                 {resultText || 'Awaiting telemetry...'}
+              </div>
+            </div>
 
-        <div className="grid gap-4 lg:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Clock3 className="size-4" /> Execution Logs
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {!logs.length && <p className="text-sm text-slate-400">No logs yet.</p>}
-              {logs.map((entry, index) => (
-                <div
-                  key={`${entry.at}-${index}`}
-                  className="rounded-md border border-slate-800/70 bg-slate-900/30 p-3"
-                >
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                    {entry.type} • {new Date(entry.at).toLocaleString()}
-                  </p>
-                  <p className="mt-1 text-sm text-slate-100/90">{entry.message}</p>
+          </div>
+
+          {/* Detailed Logs Area */}
+          <div className="lg:col-span-8 lg:row-start-2">
+            <div className="glass-card p-6 rounded-3xl animate-fade-in [animation-delay:400ms]">
+              <div className="mb-6 flex items-center justify-between">
+                 <h3 className="font-heading text-lg font-semibold text-emerald-100">Workflow Node Logs</h3>
+                 <Badge variant="outline" className="text-[10px]">Real-time Trace</Badge>
+              </div>
+              <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar">
+                {executions.map((run, idx) => (
+                  <div key={run.id} className="rounded-2xl bg-white/5 border border-white/5 overflow-hidden transition-all group hover:bg-white/[0.08]">
+                     <div className="flex items-center justify-between p-4 cursor-default">
+                        <div className="flex items-center gap-4">
+                           <div className={`h-2.5 w-2.5 rounded-full ${run.status === 'success' ? 'bg-emerald-500 shadow-[0_0_8px_emerald]' : 'bg-rose-500'}`}></div>
+                           <div className="space-y-0.5">
+                              <p className="text-xs font-bold font-heading text-slate-100 uppercase tracking-tight">Run #{run.id}</p>
+                              <p className="text-[10px] text-slate-500">{new Date(run.startedAt).toLocaleString()}</p>
+                           </div>
+                        </div>
+                        <Badge variant={run.status === 'success' ? 'success' : 'danger'} className="text-[9px] uppercase tracking-widest">{run.status}</Badge>
+                     </div>
+                     <div className="px-4 pb-4 space-y-2">
+                        {run.nodes.map((node) => (
+                          <div key={node.name} className="flex items-center justify-between px-3 py-2 rounded-xl bg-slate-950/40 border border-white/5 text-[11px]">
+                             <div className="flex items-center gap-3">
+                                <span className="text-slate-400">{node.name}</span>
+                                <span className="text-[9px] text-slate-600 px-1.5 py-0.5 rounded bg-white/5">{node.executionTime}ms</span>
+                             </div>
+                             <div className="flex items-center gap-6">
+                                <div className="text-[10px] text-slate-500">
+                                   <span className="text-emerald-400/60">{node.itemsInput}</span> → <span className="text-emerald-400">{node.itemsOutput}</span>
+                                </div>
+                                <Badge variant={node.status === 'success' ? 'success' : 'danger'} className="size-2 rounded-full p-0 flex items-center justify-center">
+                                   <div className={`size-1 rounded-full ${node.status === 'success' ? 'bg-emerald-400' : 'bg-rose-400'}`}></div>
+                                </Badge>
+                             </div>
+                          </div>
+                        ))}
+                     </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="lg:col-span-4 lg:row-start-2">
+             <div className="glass-card p-6 rounded-3xl animate-fade-in [animation-delay:450ms]">
+                <div className="mb-6 flex items-center gap-2">
+                   <HistoryIcon className="size-5 text-emerald-400/50" />
+                   <h3 className="font-heading text-lg font-semibold text-emerald-100">Conversion History</h3>
                 </div>
-              ))}
-              <div ref={scrollAnchorRef} />
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Recent City Runs</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {!history.length && <p className="text-sm text-slate-400">No city runs tracked yet.</p>}
-              {history.map((item, index) => (
-                <div key={`${item.time}-${index}`} className="rounded-md border border-slate-800/70 bg-slate-900/30 p-3">
-                  <p className="text-sm font-medium text-slate-50">{item.city || 'Unknown city'}</p>
-                  <p className="text-xs text-slate-400">Query: {item.query || '-'}</p>
-                  <p className="mt-1">
-                    <Badge variant={item.ok ? 'success' : 'danger'}>
-                      {item.ok ? 'Delivered' : 'Failed'} at {new Date(item.time).toLocaleString()}
-                    </Badge>
-                  </p>
+                <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar text-[11px]">
+                   {history.map((item, index) => (
+                      <div key={index} className="p-4 rounded-2xl bg-white/5 border border-white/5 hover:border-emerald-500/20 transition-all">
+                         <div className="flex items-center justify-between mb-2">
+                            <p className="font-bold text-slate-200 uppercase tracking-tight">{item.city}</p>
+                            <span className={`text-[9px] font-bold p-1 px-2 rounded-lg ${item.ok ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                               {item.ok ? 'DELIVERED' : 'BOUNCED'}
+                            </span>
+                         </div>
+                         <p className="text-slate-500 italic mb-3">"{item.query || 'Generic Search'}"</p>
+                         <p className="text-[9px] text-slate-600 text-right">{new Date(item.time).toLocaleTimeString()}</p>
+                      </div>
+                   ))}
                 </div>
-              ))}
-            </CardContent>
-          </Card>
+             </div>
+          </div>
+
         </div>
       </div>
     </div>
