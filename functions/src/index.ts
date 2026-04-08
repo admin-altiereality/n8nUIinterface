@@ -12,7 +12,7 @@ import { onRequest } from "firebase-functions/https";
 import * as logger from "firebase-functions/logger";
 import cors from "cors";
 import express from "express";
-import { defineSecret, defineString } from "firebase-functions/params";
+import { defineSecret } from "firebase-functions/params";
 
 // Start writing functions
 // https://firebase.google.com/docs/functions/typescript
@@ -40,8 +40,8 @@ const n8nApiKeySecret = defineSecret("N8N_API_KEY_SECRET");
 const twilioAccountSidSecret = defineSecret("TWILIO_ACCOUNT_SID");
 const twilioAuthTokenSecret = defineSecret("TWILIO_AUTH_TOKEN");
 /** Optional outbound defaults (set in `.env` for emulators or with `firebase functions:config:export` / Cloud console). */
-const twilioMessagingServiceSidParam = defineString("TWILIO_MESSAGING_SERVICE_SID", { default: "" });
-const twilioWhatsappFromParam = defineString("TWILIO_WHATSAPP_FROM", { default: "" });
+const twilioMessagingServiceSidSecret = defineSecret("TWILIO_MESSAGING_SERVICE_SID_SECRET");
+const twilioWhatsappFromSecret = defineSecret("TWILIO_WHATSAPP_FROM_SECRET");
 
 function getN8nConfig(): N8nProxyConfig {
   return {
@@ -73,8 +73,8 @@ function getTwilioConfig():
     ok: true,
     accountSid,
     authToken,
-    messagingServiceSid: twilioMessagingServiceSidParam.value(),
-    whatsappFrom: twilioWhatsappFromParam.value(),
+    messagingServiceSid: twilioMessagingServiceSidSecret.value(),
+    whatsappFrom: twilioWhatsappFromSecret.value(),
   };
 }
 
@@ -418,6 +418,8 @@ export const api = onRequest(
       n8nApiKeySecret,
       twilioAccountSidSecret,
       twilioAuthTokenSecret,
+      twilioMessagingServiceSidSecret,
+      twilioWhatsappFromSecret,
     ],
   },
   app

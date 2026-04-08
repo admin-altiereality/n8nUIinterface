@@ -9,7 +9,7 @@ import {
   setDoc,
   where
 } from 'firebase/firestore';
-import { ensureSignedInAnonymously, getDb, isFirebaseConfigured } from './firebase';
+import { getCurrentAuthUser, getDb, isFirebaseConfigured } from './firebase';
 
 export type SalesFunnelExecutionStatus = 'success' | 'error' | 'waiting';
 
@@ -94,7 +94,7 @@ export async function fetchRecentSalesFunnelRuns(limitCount: number): Promise<
 > {
   if (!isFirebaseConfigured()) return [];
 
-  const user = await ensureSignedInAnonymously();
+  const user = getCurrentAuthUser();
   if (!user) return [];
 
   const db = getDb();
@@ -153,7 +153,7 @@ export async function fetchRecentSalesFunnelRuns(limitCount: number): Promise<
 export async function fetchRecentSalesFunnelLogs(limitCount: number): Promise<SalesFunnelLogEntry[]> {
   if (!isFirebaseConfigured()) return [];
 
-  const user = await ensureSignedInAnonymously();
+  const user = getCurrentAuthUser();
   if (!user) return [];
 
   const db = getDb();

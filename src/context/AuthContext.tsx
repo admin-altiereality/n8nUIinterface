@@ -1,55 +1,102 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { User, MOCK_USERS, UserRole } from '../types/auth';
+import { User, UserRole } from '../types/auth';
+import {
+  getAuthInstance,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  fetchUserRole,
+  fetchUserDisplayName,
+  isAuthConfigured,
+  type FirebaseUser,
+} from '../lib/firebase';
 
 interface AuthContextType {
   user: User | null;
-  login: (email: string) => Promise<boolean>;
+  firebaseUser: FirebaseUser | null;
+  login: (email: string, password: string) => Promise<{ success: boolean; error?: string; role?: string }>;
   logout: () => void;
   isLoading: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+async function buildAppUser(fbUser: FirebaseUser): Promise<User> {
+  const role = await fetchUserRole(fbUser.uid);
+  const name = await fetchUserDisplayName(fbUser.uid, fbUser.displayName || fbUser.email?.split('@')[0]);
+
+  return {
+    id: fbUser.uid,
+    email: fbUser.email || '',
+    name,
+    role: role as UserRole,
+    photoURL: fbUser.photoURL || undefined,
+  };
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const savedUser = localStorage.getItem('learnxr_auth_user');
-    if (savedUser) {
-      try {
-        setUser(JSON.parse(savedUser));
-      } catch (e) {
-        console.error('Failed to parse saved user', e);
-      }
+    if (!isAuthConfigured()) {
+      setIsLoading(false);
+      return;
     }
-    setIsLoading(false);
+
+    const auth = getAuthInstance();
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      if (fbUser) {
+        setFirebaseUser(fbUser);
+        const appUser = await buildAppUser(fbUser);
+        setUser(appUser);
+      } else {
+        setFirebaseUser(null);
+        setUser(null);
+      }
+      setIsLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  const login = async (email: string): Promise<boolean> => {
+  const login = async (email: string, password: string): Promise<{ success: boolean; error?: string; role?: string }> => {
     setIsLoading(true);
-    // Simulate API delay
-    await new Promise((resolve) => setTimeout(resolve, 800));
-    
-    const foundUser = MOCK_USERS.find((u) => u.email.toLowerCase() === email.toLowerCase());
-    if (foundUser) {
-      setUser(foundUser);
-      localStorage.setItem('learnxr_auth_user', JSON.stringify(foundUser));
+    try {
+      const auth = getAuthInstance();
+      const credential = await signInWithEmailAndPassword(auth, email, password);
+      const appUser = await buildAppUser(credential.user);
+      setFirebaseUser(credential.user);
+      setUser(appUser);
       setIsLoading(false);
-      return true;
+      return { success: true, role: appUser.role };
+    } catch (err: any) {
+      setIsLoading(false);
+      const code = err?.code || '';
+      let message = 'An unexpected error occurred. Please try again.';
+      if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        message = 'Invalid email or password.';
+      } else if (code === 'auth/too-many-requests') {
+        message = 'Too many attempts. Please try again later.';
+      } else if (code === 'auth/user-disabled') {
+        message = 'This account has been disabled.';
+      } else if (code === 'auth/invalid-email') {
+        message = 'Please enter a valid email address.';
+      }
+      return { success: false, error: message };
     }
-    
-    setIsLoading(false);
-    return false;
   };
 
   const logout = () => {
+    const auth = getAuthInstance();
+    signOut(auth);
     setUser(null);
-    localStorage.removeItem('learnxr_auth_user');
+    setFirebaseUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, isLoading }}>
+    <AuthContext.Provider value={{ user, firebaseUser, login, logout, isLoading }}>
       {children}
     </AuthContext.Provider>
   );

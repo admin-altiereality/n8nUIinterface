@@ -10,24 +10,38 @@ interface ProtectedRouteProps {
   allowedRoles?: UserRole[];
 }
 
+/**
+ * Returns the default landing page for a given role.
+ */
+function getDefaultPageForRole(role: UserRole): string {
+  switch (role) {
+    case 'salesperson': return '/sales-funnel';
+    case 'whatsapp_manager': return '/twilio-messaging';
+    case 'builder': return '/';
+    case 'superadmin': return '/';
+    case 'associate': return '/';
+    default: return '/';
+  }
+}
+
 const PermissionDenied: React.FC = () => {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-950 p-6">
-      <div className="glass-card max-w-md w-full p-8 rounded-3xl text-center space-y-6 animate-scale-in">
-        <div className="mx-auto h-20 w-20 rounded-[40px] bg-rose-500/10 flex items-center justify-center border border-rose-500/20">
-          <ShieldAlert className="size-10 text-rose-500" />
+    <div className="min-h-screen flex items-center justify-center p-6" style={{ background: 'var(--bg-app)' }}>
+      <div className="surface-card max-w-md w-full p-8 rounded-xl text-center space-y-6 animate-fade-in">
+        <div className="mx-auto h-16 w-16 rounded-xl bg-red-500/10 flex items-center justify-center border border-red-500/20">
+          <ShieldAlert className="w-8 h-8 text-red-400" />
         </div>
         <div className="space-y-2">
-          <h2 className="text-2xl font-bold text-slate-100 uppercase tracking-tight font-heading">Access Denied</h2>
-          <p className="text-sm text-slate-400 leading-relaxed font-medium">
-            Your current role does not have permission to view this restricted page. Please contact a superadmin if you believe this is an error.
+          <h2 className="text-xl font-bold text-zinc-100 font-heading">Access Denied</h2>
+          <p className="text-sm text-zinc-400 leading-relaxed">
+            Your current role does not have permission to view this page. Please contact your administrator if you believe this is an error.
           </p>
         </div>
         <Link 
           to="/" 
-          className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-rose-400 hover:text-rose-300 transition-all"
+          className="inline-flex items-center gap-2 text-xs font-semibold text-red-400 hover:text-red-300 transition-all"
         >
-          <ArrowLeft className="size-4" /> Return to Dashboard
+          <ArrowLeft className="w-4 h-4" /> Return to Dashboard
         </Link>
       </div>
     </div>
@@ -40,8 +54,8 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children, allowe
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-950">
-        <div className="h-12 w-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin" />
+      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--bg-app)' }}>
+        <div className="h-10 w-10 border-3 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin" />
       </div>
     );
   }
@@ -51,6 +65,12 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children, allowe
   }
 
   if (allowedRoles && !allowedRoles.includes(user.role)) {
+    // Instead of showing Access Denied, redirect to the user's default page
+    const defaultPage = getDefaultPageForRole(user.role);
+    if (defaultPage !== location.pathname) {
+      return <Navigate to={defaultPage} replace />;
+    }
+    // If already on their default page and still denied, show the error
     return <PermissionDenied />;
   }
 

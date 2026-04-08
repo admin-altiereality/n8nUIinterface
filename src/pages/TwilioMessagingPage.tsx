@@ -1,9 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
 import {
-  AlertTriangle,
   CheckCheck,
-  Clock3,
   Loader2,
   MessageCircleMore,
   Paperclip,
@@ -12,20 +9,18 @@ import {
   Send,
   Smartphone,
   X,
-  UserRound,
   Plus,
   MoreVertical,
-  ShieldCheck,
-  LogOut,
-  User,
+  Phone,
+  Video,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Input } from '../components/ui/input';
 import { Textarea } from '../components/ui/textarea';
 import { Label } from '../components/ui/label';
+import { Avatar } from '../components/ui/avatar';
 import {
   fetchTwilioHealth,
   getTwilioMessage,
@@ -56,17 +51,9 @@ function normalizeParty(value: string | undefined): string {
 function normalizeRecipient(value: string): string {
   const val = value.trim();
   if (!val) return '';
-
-  // If it already has a prefix, leave it alone.
   if (val.startsWith('whatsapp:') || val.startsWith('+')) return val;
-
-  // If it's a 10-digit number, assume Indian (+91) and WhatsApp.
   if (/^\d{10}$/.test(val)) return `whatsapp:+91${val}`;
-
-  // If it's all digits but not 10, just add whatsapp:+ for now (user might have entered a different country code).
   if (/^\d+$/.test(val)) return `whatsapp:+${val}`;
-
-  // Default to adding whatsapp: prefix if missing.
   return `whatsapp:${val}`;
 }
 
@@ -83,30 +70,16 @@ function messageTime(message: TwilioMessage): number {
 
 function shortTime(timeMs: number): string {
   if (!timeMs) return '';
-  return new Intl.DateTimeFormat(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(timeMs));
+  return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(new Date(timeMs));
 }
 
 function smartDate(timeMs: number): string {
   if (!timeMs) return '';
   const date = new Date(timeMs);
   const now = new Date();
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
+  const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
   if (sameDay) return shortTime(timeMs);
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
-}
-
-function bubbleStatusVariant(status: string | undefined): 'secondary' | 'warning' | 'danger' | 'success' {
-  const s = String(status || '').toLowerCase();
-  if (s === 'failed' || s === 'undelivered' || s === 'canceled') return 'danger';
-  if (s === 'queued' || s === 'sending' || s === 'sent' || s === 'accepted') return 'warning';
-  if (s === 'delivered' || s === 'read' || s === 'received') return 'success';
-  return 'secondary';
 }
 
 function getContactForThread(message: TwilioMessage): string {
@@ -115,85 +88,54 @@ function getContactForThread(message: TwilioMessage): string {
 
 function buildThreads(messages: TwilioMessage[]): Thread[] {
   const grouped = new Map<string, TwilioMessage[]>();
-
   for (const message of messages) {
     const key = getContactForThread(message);
     const arr = grouped.get(key);
-    if (arr) arr.push(message);
-    else grouped.set(key, [message]);
+    if (arr) arr.push(message); else grouped.set(key, [message]);
   }
-
   const threads: Thread[] = [];
   for (const [key, arr] of grouped.entries()) {
     const sorted = [...arr].sort((a, b) => messageTime(a) - messageTime(b));
     const last = sorted[sorted.length - 1];
     const latest = [...sorted].reverse();
-    const preferredAddress =
-      latest.find((m) => isInbound(m.direction))?.from ||
-      latest.find((m) => !isInbound(m.direction))?.to ||
-      key;
+    const preferredAddress = latest.find((m) => isInbound(m.direction))?.from || latest.find((m) => !isInbound(m.direction))?.to || key;
     const unreadCount = sorted.filter((m) => isInbound(m.direction) && String(m.status || '').toLowerCase() !== 'read').length;
-    const lastTextRaw =
-      (last && last.body) ||
-      (last && Array.isArray(last.media) && last.media.length > 0 ? 'Attachment' : '(No text)');
-    threads.push({
-      id: key,
-      contact: key,
-      sendTo: preferredAddress,
-      lastText: String(lastTextRaw).slice(0, 72),
-      lastAt: messageTime(last),
-      unreadCount,
-      messages: sorted,
-    });
+    const lastTextRaw = (last && last.body) || (last && Array.isArray(last.media) && last.media.length > 0 ? 'Attachment' : '(No text)');
+    threads.push({ id: key, contact: key, sendTo: preferredAddress, lastText: String(lastTextRaw).slice(0, 72), lastAt: messageTime(last), unreadCount, messages: sorted });
   }
-
   threads.sort((a, b) => b.lastAt - a.lastAt);
   return threads;
 }
 
 function threadLastInbound(thread: Thread): TwilioMessage | null {
-  for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
-    if (isInbound(thread.messages[i].direction)) return thread.messages[i];
-  }
+  for (let i = thread.messages.length - 1; i >= 0; i -= 1) { if (isInbound(thread.messages[i].direction)) return thread.messages[i]; }
   return null;
 }
 
 function threadLastOutbound(thread: Thread): TwilioMessage | null {
-  for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
-    if (!isInbound(thread.messages[i].direction)) return thread.messages[i];
-  }
+  for (let i = thread.messages.length - 1; i >= 0; i -= 1) { if (!isInbound(thread.messages[i].direction)) return thread.messages[i]; }
   return null;
 }
 
-function followUpState(thread: Thread): {
-  needsFollowUp: boolean;
-  hasFailed: boolean;
-  risk: 'low' | 'medium' | 'high';
-  waitingMinutes: number;
-} {
+function followUpState(thread: Thread): { needsFollowUp: boolean; hasFailed: boolean; risk: 'low' | 'medium' | 'high'; waitingMinutes: number } {
   const lastInbound = threadLastInbound(thread);
   const lastOutbound = threadLastOutbound(thread);
   const inboundTime = lastInbound ? messageTime(lastInbound) : 0;
   const outboundTime = lastOutbound ? messageTime(lastOutbound) : 0;
   const needsFollowUp = Boolean(inboundTime && inboundTime > outboundTime);
   const waitingMinutes = needsFollowUp ? Math.max(0, Math.round((Date.now() - inboundTime) / 60000)) : 0;
-  const hasFailed = thread.messages.some((m) => {
-    const s = String(m.status || '').toLowerCase();
-    return s === 'failed' || s === 'undelivered';
-  });
-
+  const hasFailed = thread.messages.some((m) => { const s = String(m.status || '').toLowerCase(); return s === 'failed' || s === 'undelivered'; });
   let risk: 'low' | 'medium' | 'high' = 'low';
   if (needsFollowUp && waitingMinutes >= 180) risk = 'high';
   else if (needsFollowUp && waitingMinutes >= 45) risk = 'medium';
-
   return { needsFollowUp, hasFailed, risk, waitingMinutes };
 }
 
 function waitingLabel(waitingMinutes: number): string {
-  if (waitingMinutes < 60) return `${waitingMinutes}m waiting`;
+  if (waitingMinutes < 60) return `${waitingMinutes}m`;
   const h = Math.floor(waitingMinutes / 60);
   const m = waitingMinutes % 60;
-  return `${h}h ${m}m waiting`;
+  return `${h}h ${m}m`;
 }
 
 export default function TwilioMessagingPage() {
@@ -223,57 +165,31 @@ export default function TwilioMessagingPage() {
   const messageEndRef = useRef<HTMLDivElement | null>(null);
 
   const loadFirstPage = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+    setLoading(true); setError(null);
     try {
-      const h = await fetchTwilioHealth();
-      setHealth(h);
-      const result = await listTwilioMessages({ pageSize: 50 });
-      setMessages(result.messages);
-      setNextPageToken(result.nextPageToken);
+      const h = await fetchTwilioHealth(); setHealth(h);
+      const result = await listTwilioMessages({ pageSize: 50 }); setMessages(result.messages); setNextPageToken(result.nextPageToken);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not load messages.');
-      setMessages([]);
-      setNextPageToken(null);
-      setHealth({ ok: false, accountHint: null });
-    } finally {
-      setLoading(false);
-    }
+      setError(e instanceof Error ? e.message : 'Could not load messages.'); setMessages([]); setNextPageToken(null); setHealth({ ok: false, accountHint: null });
+    } finally { setLoading(false); }
   }, []);
 
   const loadMore = useCallback(async () => {
-    if (!nextPageToken) return;
-    setLoadingMore(true);
-    setError(null);
+    if (!nextPageToken) return; setLoadingMore(true); setError(null);
     try {
-      const result = await listTwilioMessages({ pageSize: 50, pageToken: nextPageToken });
-      setMessages((prev) => [...prev, ...result.messages]);
-      setNextPageToken(result.nextPageToken);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not load older messages.');
-    } finally {
-      setLoadingMore(false);
-    }
+      const result = await listTwilioMessages({ pageSize: 50, pageToken: nextPageToken }); setMessages((prev) => [...prev, ...result.messages]); setNextPageToken(result.nextPageToken);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not load older messages.'); }
+    finally { setLoadingMore(false); }
   }, [nextPageToken]);
 
-  useEffect(() => {
-    void loadFirstPage();
-  }, [loadFirstPage]);
-
-  useEffect(() => {
-    return () => {
-      if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
-    };
-  }, [attachmentPreviewUrl]);
+  useEffect(() => { void loadFirstPage(); }, [loadFirstPage]);
+  useEffect(() => { return () => { if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl); }; }, [attachmentPreviewUrl]);
 
   const threads = useMemo(() => buildThreads(messages), [messages]);
   const filteredThreads = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return threads;
-    return threads.filter((thread) => {
-      if (thread.contact.toLowerCase().includes(q)) return true;
-      return thread.messages.some((m) => String(m.body || '').toLowerCase().includes(q));
-    });
+    return threads.filter((thread) => { if (thread.contact.toLowerCase().includes(q)) return true; return thread.messages.some((m) => String(m.body || '').toLowerCase().includes(q)); });
   }, [threads, search]);
 
   const queueFilteredThreads = useMemo(() => {
@@ -289,108 +205,55 @@ export default function TwilioMessagingPage() {
 
   const queueStats = useMemo(() => {
     const states = threads.map((t) => followUpState(t));
-    return {
-      total: threads.length,
-      needsFollowUp: states.filter((s) => s.needsFollowUp).length,
-      highRisk: states.filter((s) => s.risk === 'high').length,
-      failed: states.filter((s) => s.hasFailed).length,
-    };
+    return { total: threads.length, needsFollowUp: states.filter((s) => s.needsFollowUp).length, highRisk: states.filter((s) => s.risk === 'high').length, failed: states.filter((s) => s.hasFailed).length };
   }, [threads]);
 
   useEffect(() => {
-    if (!selectedThreadId && !isNewChatMode && queueFilteredThreads[0]) {
-      setSelectedThreadId(queueFilteredThreads[0].id);
-    }
+    if (!selectedThreadId && !isNewChatMode && queueFilteredThreads[0]) setSelectedThreadId(queueFilteredThreads[0].id);
   }, [queueFilteredThreads, selectedThreadId, isNewChatMode]);
 
-  const activeThread = useMemo(
-    () => (isNewChatMode ? null : queueFilteredThreads.find((thread) => thread.id === selectedThreadId) || queueFilteredThreads[0] || null),
-    [queueFilteredThreads, selectedThreadId, isNewChatMode]
-  );
-
+  const activeThread = useMemo(() => (isNewChatMode ? null : queueFilteredThreads.find((thread) => thread.id === selectedThreadId) || queueFilteredThreads[0] || null), [queueFilteredThreads, selectedThreadId, isNewChatMode]);
   const activeFollowUp = useMemo(() => (activeThread ? followUpState(activeThread) : null), [activeThread]);
-
   const normalizedManualTo = useMemo(() => normalizeRecipient(manualTo), [manualTo]);
 
   useEffect(() => {
     if (!autoScroll) return;
-    // Scroll to the latest message when switching chats or new messages arrive.
-    requestAnimationFrame(() => {
-      messageEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
-    });
+    requestAnimationFrame(() => { messageEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' }); });
   }, [autoScroll, activeThread?.id, activeThread?.messages.length]);
 
   const onSend = async () => {
     const to = isNewChatMode ? normalizedManualTo : activeThread?.sendTo;
     const text = composerText.trim();
     if (!to || (!text && !attachmentFile)) return;
-
-    setSending(true);
-    setSendInfo(null);
+    setSending(true); setSendInfo(null);
     try {
       setAutoScroll(true);
-
       let mediaUrl: string | undefined;
       if (attachmentFile) {
         setSendInfo(`Uploading ${attachmentFile.name}…`);
-        if (!firebaseEnabled) {
-          throw new Error('Firebase is not configured for media uploads.');
-        }
+        if (!firebaseEnabled) throw new Error('Firebase is not configured for media uploads.');
         const uploaded = await uploadTwilioMediaToStorage(attachmentFile, { pathPrefix: 'twilio-media' });
         mediaUrl = uploaded.downloadUrl;
         setSendInfo('Media uploaded. Sending to WhatsApp…');
       }
-
-      // WhatsApp does not deliver a text Body together with media types.
-      // We send ONLY media when an attachment is selected.
       const bodyToSend = attachmentFile ? '' : text;
-
-      const sent = await sendTwilioMessage({
-        to,
-        body: bodyToSend,
-        mediaUrl,
-      });
-
+      const sent = await sendTwilioMessage({ to, body: bodyToSend, mediaUrl });
       setComposerText('');
       if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
-      setAttachmentPreviewUrl(null);
-      setAttachmentFile(null);
-
-      // Update UI with the full message payload (so `media` field show up),
-      // instead of relying only on the list endpoint.
+      setAttachmentPreviewUrl(null); setAttachmentFile(null);
       try {
-        // If we sent media, fetch full message to ensure `media` field exists.
         let debug: string | null = null;
         if (mediaUrl && sent.sid) {
           const full = await getTwilioMessage(sent.sid);
           debug = `Twilio status: ${String(full.status || 'n/a')}, mediaItems: ${Array.isArray(full.media) ? full.media.length : 0}`;
-          setMessages((prev) => {
-            const idx = prev.findIndex((m) => m.sid === full.sid);
-            if (idx >= 0) {
-              const copy = [...prev];
-              copy[idx] = full;
-              return copy;
-            }
-            return [...prev, full];
-          });
+          setMessages((prev) => { const idx = prev.findIndex((m) => m.sid === full.sid); if (idx >= 0) { const copy = [...prev]; copy[idx] = full; return copy; } return [...prev, full]; });
         }
-        setSendInfo(debug ? `Sent successfully. ${debug}` : 'Sent successfully.');
-      } catch {
-        // If full fetch fails, just fall back to reload.
-        setSendInfo('Sent successfully.');
-      }
-
+        setSendInfo(debug ? `Sent. ${debug}` : 'Sent successfully.');
+      } catch { setSendInfo('Sent successfully.'); }
       await loadFirstPage();
-      if (isNewChatMode) {
-        setIsNewChatMode(false);
-        setManualTo('');
-        // Let the useEffect handle selection of the new thread if it appears
-      }
-    } catch (e) {
-      setSendInfo(e instanceof Error ? e.message : 'Send failed.');
-    } finally {
-      setSending(false);
-    }
+      if (isNewChatMode) { setIsNewChatMode(false); setManualTo(''); }
+    } catch (e) { setSendInfo(e instanceof Error ? e.message : 'Send failed.'); }
+    finally { setSending(false); }
   };
 
   const recipient = activeThread ? activeThread.sendTo : manualTo.trim();
@@ -398,339 +261,239 @@ export default function TwilioMessagingPage() {
 
   const removeAttachment = () => {
     if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
-    setAttachmentPreviewUrl(null);
-    setAttachmentFile(null);
+    setAttachmentPreviewUrl(null); setAttachmentFile(null);
   };
 
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
 
   return (
-    <div className="min-h-screen bg-transparent text-slate-100 selection:bg-rose-500/30">
-      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        
-        {/* Header */}
-        <header className="glass-card mb-8 rounded-3xl p-6 lg:p-8 animate-fade-in">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-            <div className="space-y-3">
-              <div className="inline-flex items-center gap-2 rounded-full border border-rose-500/20 bg-rose-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-rose-300">
-                <ShieldCheck className="size-3" />
-                {user?.role === 'superadmin' ? 'Super Admin' : 'Chat Manager'}
-              </div>
-              <h1 className="text-gradient-rose text-3xl font-bold tracking-tight sm:text-4xl lg:text-5xl">
-                Messages
-              </h1>
-              <div className="flex items-center gap-2 text-xs text-slate-500 font-medium">
-                <User className="size-3 text-rose-400" />
-                <span>Logged in as <span className="text-slate-300">{user?.name}</span></span>
-              </div>
-            </div>
-            
-            <div className="flex flex-wrap items-center gap-3">
-               {health && health.ok && (
-                  <div className="glass-card flex items-center gap-2 h-9 px-4 rounded-2xl text-[10px] font-black uppercase tracking-widest text-emerald-400 border-emerald-500/10 mr-4">
-                    <ShieldCheck className="size-3" /> Twilio Healthy
-                  </div>
-               )}
-              
-              {user?.role === 'superadmin' && (
-                <>
-                  <Link to="/" className="glass-card rounded-2xl px-5 py-2.5 text-xs font-semibold text-slate-200 hover:bg-white/5 transition-all">
-                    Builder
-                  </Link>
-                  <Link to="/sales-funnel" className="glass-card border-emerald-500/10 bg-emerald-500/5 rounded-2xl px-5 py-2.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-500/10 transition-all">
-                    Funnel
-                  </Link>
-                </>
-              )}
+    <div className="p-6 h-[calc(100vh)] animate-fade-in">
+      {/* Chat Container */}
+      <div className="chat-container h-full">
 
-              <Button 
-                variant="ghost" 
-                onClick={logout}
-                className="rounded-2xl px-4 py-2.5 text-xs font-bold text-rose-500 hover:bg-rose-500/10 transition-all flex items-center gap-2 border border-rose-500/10"
-              >
-                <LogOut className="size-3" /> Sign Out
-              </Button>
+        {/* Left Panel — Thread List */}
+        <div className="chat-sidebar">
+          <div className="chat-sidebar-header">
+            <h2 className="text-sm font-semibold text-zinc-100 font-heading">Chats</h2>
+            <div className="flex items-center gap-1">
+              <button onClick={() => { setIsNewChatMode(true); setSelectedThreadId(null); }} className="p-2 rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-all" title="New chat">
+                <Plus className="w-4 h-4" />
+              </button>
+              <button onClick={() => void loadFirstPage()} className="p-2 rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-all" title="Refresh">
+                <RefreshCw className={`w-4 h-4 ${loading && !loadingMore ? 'animate-spin' : ''}`} />
+              </button>
             </div>
           </div>
-        </header>
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 h-[calc(100vh-320px)] min-h-[600px]">
-          
-          {/* Sidebar - Threads */}
-          <div className="lg:col-span-4 flex flex-col h-full glass-card rounded-3xl overflow-hidden animate-fade-in [animation-delay:100ms]">
-            <div className="p-5 border-b border-white/5 bg-white/5 flex items-center justify-between">
-               <h3 className="font-heading text-lg font-semibold text-rose-100 uppercase tracking-tight">Chats</h3>
-               <div className="flex items-center gap-2">
-                  <button onClick={() => { setIsNewChatMode(true); setSelectedThreadId(null); }} className="p-2 rounded-xl bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 transition-all active:scale-95">
-                     <Plus className="size-4" />
-                  </button>
-                  <button onClick={() => void loadFirstPage()} className="p-2 rounded-xl bg-white/5 text-slate-400 hover:bg-white/10 transition-all">
-                     <RefreshCw className={`size-4 ${loading && !loadingMore ? 'animate-spin' : ''}`} />
-                  </button>
-               </div>
+          <div className="chat-search">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
+              <Input placeholder="Search or start new chat" value={search} onChange={(e) => setSearch(e.target.value)} className="h-9 pl-10 bg-zinc-800/50 border-zinc-700/50 rounded-lg text-xs" />
             </div>
-
-            <div className="p-4 border-b border-white/5">
-               <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-slate-500" />
-                  <Input 
-                    placeholder="Search messages..." 
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    className="h-10 pl-10 bg-slate-950/50 border-white/5 rounded-xl text-xs"
-                  />
-               </div>
-               <div className="grid grid-cols-2 gap-2 mt-3 text-[9px] font-bold uppercase tracking-wider">
-                  <button onClick={() => setQueueFilter('needsFollowUp')} className={`p-2 rounded-lg border transition-all ${queueFilter === 'needsFollowUp' ? 'border-amber-500/40 bg-amber-500/10 text-amber-300' : 'border-white/5 bg-white/5 text-slate-500'}`}>
-                    Follow-up ({queueStats.needsFollowUp})
+            <div className="flex gap-1.5 mt-2">
+              {(['all', 'needsFollowUp', 'failed'] as QueueFilter[]).map((f) => {
+                const label = f === 'all' ? 'All' : f === 'needsFollowUp' ? `Follow-up (${queueStats.needsFollowUp})` : `Failed (${queueStats.failed})`;
+                return (
+                  <button key={f} onClick={() => setQueueFilter(f)} className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-all ${queueFilter === f ? 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30' : 'bg-zinc-800/50 text-zinc-500 border border-transparent hover:text-zinc-300'}`}>
+                    {label}
                   </button>
-                  <button onClick={() => setQueueFilter('failed')} className={`p-2 rounded-lg border transition-all ${queueFilter === 'failed' ? 'border-rose-500/40 bg-rose-500/10 text-rose-300' : 'border-white/5 bg-white/5 text-slate-500'}`}>
-                    Failed ({queueStats.failed})
-                  </button>
-               </div>
+                );
+              })}
             </div>
+          </div>
 
-            <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
-              {loading && !loadingMore && threads.length === 0 ? (
-                Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="h-16 w-full animate-pulse rounded-2xl bg-white/5 border border-white/5"></div>
-                ))
-              ) : threads.length === 0 ? (
-                <div className="flex h-32 items-center justify-center p-6 text-center text-slate-500 text-xs italic">
-                  No conversations
+          <div className="chat-thread-list">
+            {loading && !loadingMore && threads.length === 0 ? (
+              Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="chat-thread-item">
+                  <div className="w-10 h-10 rounded-full bg-zinc-800 animate-pulse flex-shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 bg-zinc-800 rounded animate-pulse w-24" />
+                    <div className="h-2.5 bg-zinc-800 rounded animate-pulse w-36" />
+                  </div>
                 </div>
-              ) : (
-                queueFilteredThreads.map((thread) => {
-                  const selected = activeThread?.id === thread.id;
-                  const state = followUpState(thread);
-                  return (
-                    <button
-                      key={thread.id}
-                      onClick={() => { setSelectedThreadId(thread.id); setIsNewChatMode(false); }}
-                      className={`w-full p-4 rounded-2xl transition-all border group text-left ${
-                        selected && !isNewChatMode
-                          ? 'bg-rose-500/10 border-rose-500/20 shadow-lg shadow-rose-950/20'
-                          : 'bg-white/5 border-white/5 hover:bg-white/[0.08] hover:border-white/10'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between mb-1.5">
-                         <p className={`text-xs font-bold font-heading uppercase tracking-tight ${selected && !isNewChatMode ? 'text-rose-200' : 'text-slate-100'}`}>
-                            {thread.contact}
-                         </p>
-                         <span className="text-[9px] text-slate-600 font-medium">{smartDate(thread.lastAt)}</span>
+              ))
+            ) : threads.length === 0 ? (
+              <div className="flex items-center justify-center py-12 text-zinc-600 text-xs">No conversations</div>
+            ) : (
+              queueFilteredThreads.map((thread) => {
+                const selected = activeThread?.id === thread.id && !isNewChatMode;
+                const state = followUpState(thread);
+                return (
+                  <button key={thread.id} onClick={() => { setSelectedThreadId(thread.id); setIsNewChatMode(false); }} className={`chat-thread-item ${selected ? 'active' : ''}`}>
+                    <Avatar name={thread.contact} size="md" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between mb-0.5">
+                        <p className="text-[13px] font-medium text-zinc-200 truncate">{thread.contact}</p>
+                        <span className="text-[10px] text-zinc-600 flex-shrink-0 ml-2">{smartDate(thread.lastAt)}</span>
                       </div>
-                      <p className="text-[11px] text-slate-500 line-clamp-1 group-hover:text-slate-400 transition-colors">
-                         {thread.lastText || 'Sent media'}
-                      </p>
-                      {(state.needsFollowUp || thread.unreadCount > 0) && (
-                        <div className="mt-2.5 flex flex-wrap gap-1.5">
-                          {thread.unreadCount > 0 && <Badge variant="success" className="text-[8px] h-4 uppercase px-1">NEW</Badge>}
+                      <div className="flex items-center justify-between">
+                        <p className="text-[12px] text-zinc-500 truncate">{thread.lastText || 'Sent media'}</p>
+                        <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
+                          {thread.unreadCount > 0 && (
+                            <span className="flex items-center justify-center h-4 min-w-[16px] px-1 rounded-full bg-emerald-600 text-[9px] font-bold text-white">{thread.unreadCount}</span>
+                          )}
                           {state.needsFollowUp && (
-                            <div className={`p-1 px-2 rounded-full text-[8px] font-bold ${state.risk === 'high' ? 'bg-rose-500/20 text-rose-400' : 'bg-amber-500/20 text-amber-400'}`}>
-                              {waitingLabel(state.waitingMinutes)}
-                            </div>
+                            <span className={`text-[9px] font-medium ${state.risk === 'high' ? 'text-red-400' : 'text-amber-400'}`}>{waitingLabel(state.waitingMinutes)}</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+            {nextPageToken && (
+              <button onClick={() => void loadMore()} disabled={loadingMore} className="w-full py-3 text-[10px] text-zinc-500 hover:text-zinc-300 transition-all font-medium">
+                {loadingMore ? 'Loading...' : 'Load older messages'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Right Panel — Chat Area */}
+        <div className="chat-main">
+
+          {/* Header */}
+          <div className="chat-main-header">
+            <div className="flex items-center gap-3">
+              <Avatar name={isNewChatMode ? 'New' : activeThread?.contact} size="md" />
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100">{isNewChatMode ? 'New Conversation' : activeThread ? activeThread.contact : 'Select a chat'}</h3>
+                <p className="text-[11px] text-zinc-500">{isNewChatMode ? 'Enter recipient below' : activeThread ? 'WhatsApp' : ''}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1">
+              {health.ok && <Badge variant="success" className="text-[9px] mr-2">Connected</Badge>}
+            </div>
+          </div>
+
+          {/* Messages */}
+          <div ref={messageScrollRef} className="chat-messages" onScroll={() => {
+            const el = messageScrollRef.current;
+            if (!el) return;
+            const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+            setAutoScroll(distanceFromBottom < 140);
+          }}>
+            {!activeThread && !isNewChatMode ? (
+              <div className="flex h-full items-center justify-center">
+                <div className="text-center space-y-3">
+                  <div className="mx-auto h-16 w-16 rounded-full bg-zinc-800/50 flex items-center justify-center">
+                    <MessageCircleMore className="w-8 h-8 text-zinc-700" />
+                  </div>
+                  <p className="text-sm text-zinc-600">Select a chat to start messaging</p>
+                </div>
+              </div>
+            ) : isNewChatMode ? (
+              <div className="flex h-full items-center justify-center">
+                <div className="max-w-xs text-center space-y-4">
+                  <div className="mx-auto h-16 w-16 rounded-full bg-zinc-800/50 flex items-center justify-center">
+                    <Smartphone className="w-8 h-8 text-zinc-700" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-semibold text-zinc-200 mb-1">New Message</h4>
+                    <p className="text-xs text-zinc-500 leading-relaxed">Enter a WhatsApp number below to start a conversation.</p>
+                  </div>
+                </div>
+              </div>
+            ) : activeThread && (
+              activeThread.messages.map((message) => {
+                const inbound = isInbound(message.direction);
+                const t = messageTime(message);
+                const firstMedia = Array.isArray(message.media) && message.media.length > 0 ? message.media[0] : undefined;
+                const mediaUrl = firstMedia?.preview_url || firstMedia?.media_url || firstMedia?.uri;
+                const contentType = String(firstMedia?.content_type || '');
+                const filename = firstMedia?.filename || 'Attachment';
+
+                return (
+                  <div key={message.sid} className={`flex ${inbound ? 'justify-start' : 'justify-end'}`}>
+                    <div className={`chat-bubble ${inbound ? 'inbound' : 'outbound'}`}>
+                      {message.body && <p className="whitespace-pre-wrap">{message.body}</p>}
+                      {mediaUrl && (
+                        <div className="mt-2">
+                          {contentType.startsWith('image') ? (
+                            <img src={mediaUrl} alt={filename} className="max-w-full rounded-md" />
+                          ) : contentType.startsWith('video') ? (
+                            <video controls src={mediaUrl} className="max-w-full rounded-md" />
+                          ) : (
+                            <a href={mediaUrl} target="_blank" rel="noreferrer" className="flex items-center gap-2 p-2 rounded-md bg-white/5 text-xs text-zinc-300 hover:bg-white/10 transition-all">
+                              <Paperclip className="w-3 h-3" /> {filename}
+                            </a>
                           )}
                         </div>
                       )}
-                    </button>
-                  );
-                })
-              )}
-              {nextPageToken && (
-                <button 
-                   onClick={() => void loadMore()} 
-                   disabled={loadingMore}
-                   className="w-full py-3 rounded-2xl border border-dashed border-white/10 text-[9px] text-slate-500 hover:text-rose-300 hover:border-rose-500/30 transition-all font-bold tracking-widest uppercase"
-                >
-                  {loadingMore ? 'Syncing...' : 'Load History'}
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Main Chat Area */}
-          <div className="lg:col-span-8 flex flex-col h-full glass-card rounded-3xl overflow-hidden animate-fade-in [animation-delay:200ms]">
-            
-            {/* Thread Header */}
-            <div className="p-5 border-b border-white/5 bg-white/5 flex items-center justify-between">
-               <div className="flex items-center gap-4">
-                  <div className="h-10 w-10 rounded-2xl bg-gradient-to-br from-rose-500/20 to-indigo-500/20 flex items-center justify-center border border-white/10">
-                     <UserRound className="size-5 text-rose-300" />
-                  </div>
-                  <div>
-                     <h3 className="font-heading font-bold text-slate-100 uppercase tracking-tight">
-                        {isNewChatMode ? 'New Conversation' : activeThread ? activeThread.contact : 'Messenger'}
-                     </h3>
-                     <p className="text-[10px] text-slate-600 font-medium">{isNewChatMode ? 'Recipient required' : activeThread ? 'WhatsApp Chat' : 'Select a thread'}</p>
-                  </div>
-               </div>
-               <div className="flex items-center gap-2">
-                  <button className="p-2 rounded-xl hover:bg-white/5 text-slate-600 transition-all">
-                      <MoreVertical className="size-5" />
-                  </button>
-               </div>
-            </div>
-
-            {/* Messages */}
-            <div 
-              ref={messageScrollRef}
-              className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-950/20 custom-scrollbar"
-              onScroll={() => {
-                const el = messageScrollRef.current;
-                if (!el) return;
-                const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-                setAutoScroll(distanceFromBottom < 140);
-              }}
-            >
-              {!activeThread && !isNewChatMode ? (
-                <div className="flex h-full items-center justify-center">
-                   <div className="text-center space-y-4">
-                      <div className="mx-auto h-16 w-16 rounded-3xl bg-white/5 flex items-center justify-center border border-white/5">
-                         <MessageCircleMore className="size-8 text-slate-800" />
-                      </div>
-                      <p className="text-[11px] text-slate-600 font-bold uppercase tracking-widest">Select a chat to begin</p>
-                   </div>
-                </div>
-              ) : isNewChatMode ? (
-                <div className="flex h-full items-center justify-center">
-                   <div className="max-w-xs text-center space-y-6">
-                      <div className="mx-auto h-20 w-20 rounded-[40px] bg-rose-500/5 flex items-center justify-center border border-rose-500/10">
-                         <Smartphone className="size-10 text-rose-500/40" />
-                      </div>
-                      <div className="space-y-2">
-                         <h4 className="font-heading font-bold text-slate-100 uppercase tracking-tight">Draft New Message</h4>
-                         <p className="text-xs text-slate-500 leading-relaxed font-medium">Start a direct WhatsApp session by entering a recipient number below.</p>
-                      </div>
-                   </div>
-                </div>
-              ) : activeThread && (
-                activeThread.messages.map((message) => {
-                  const inbound = isInbound(message.direction);
-                  const t = messageTime(message);
-                  const firstMedia = Array.isArray(message.media) && message.media.length > 0 ? message.media[0] : undefined;
-                  const mediaUrl = firstMedia?.preview_url || firstMedia?.media_url || firstMedia?.uri;
-                  const contentType = String(firstMedia?.content_type || '');
-                  const filename = firstMedia?.filename || 'Attachment';
-
-                  return (
-                    <div key={message.sid} className={`flex ${inbound ? 'justify-start' : 'justify-end'} animate-scale-in`}>
-                       <div className={`max-w-[75%] space-y-1.5`}>
-                          <div className={`p-4 rounded-3xl border shadow-xl ${
-                            inbound 
-                              ? 'bg-slate-900 border-white/5 rounded-tl-none shadow-black/40' 
-                              : 'bg-rose-500/10 border-rose-500/20 rounded-tr-none shadow-rose-950/20'
-                          }`}>
-                             {message.body && (
-                                <p className="text-[13px] leading-[1.6] text-slate-200 whitespace-pre-wrap">{message.body}</p>
-                             )}
-                             {mediaUrl && (
-                               <div className="mt-3">
-                                  {contentType.startsWith('image') ? (
-                                    <img src={mediaUrl} alt={filename} className="max-w-full rounded-2xl border border-white/10" />
-                                  ) : contentType.startsWith('video') ? (
-                                    <video controls src={mediaUrl} className="max-w-full rounded-2xl border border-white/10" />
-                                  ) : (
-                                    <a href={mediaUrl} target="_blank" rel="noreferrer" className="flex items-center gap-3 p-3 rounded-2xl bg-white/5 border border-white/5 text-xs text-slate-300 hover:bg-white/10 transition-all">
-                                       <Paperclip className="size-4" /> {filename}
-                                    </a>
-                                  )}
-                               </div>
-                             )}
-                             <div className="mt-3 flex items-center justify-end gap-2 text-[8px] font-black text-slate-600 uppercase tracking-[0.2em]">
-                                <span>{shortTime(t)}</span>
-                                {!inbound && (
-                                   <div className="flex items-center gap-0.5">
-                                      <CheckCheck className={`size-3 ${message.status === 'read' ? 'text-rose-500' : 'text-slate-700'}`} />
-                                   </div>
-                                )}
-                             </div>
-                          </div>
-                          {(message.status === 'failed' || message.status === 'undelivered') && (
-                             <p className="text-[8px] text-rose-500 font-bold uppercase tracking-widest text-right">
-                                {message.error_code === 63016 ? '24h Window Closed' : `Failed: ${message.error_code}`}
-                             </p>
-                          )}
-                       </div>
-                    </div>
-                  );
-                })
-              )}
-              <div ref={messageEndRef} />
-            </div>
-
-            {/* Input Area */}
-            <div className="p-5 border-t border-white/5 bg-white/5">
-               {isNewChatMode && (
-                  <div className="mb-4 animate-slide-up">
-                     <div className="flex items-center justify-between mb-2 px-1">
-                        <Label className="text-[9px] font-black uppercase tracking-[0.2em] text-rose-500">Recipient</Label>
-                        {manualTo.trim() && (
-                          <span className="text-[9px] font-mono text-slate-600">Formatted: {normalizedManualTo}</span>
+                      <div className="chat-bubble-meta">
+                        <span>{shortTime(t)}</span>
+                        {!inbound && (
+                          <CheckCheck className={`w-3.5 h-3.5 ${message.status === 'read' ? 'text-blue-400' : message.status === 'delivered' ? 'text-zinc-400' : 'text-zinc-600'}`} />
                         )}
-                     </div>
-                     <Input 
-                       value={manualTo}
-                       onChange={(e) => setManualTo(e.target.value)}
-                       placeholder="e.g. 9821012345"
-                       className="h-11 bg-slate-950/80 border-rose-500/20 rounded-2xl font-mono text-xs focus:ring-rose-500/10 transition-all"
-                     />
+                      </div>
+                    </div>
                   </div>
-               )}
-               <div className="flex items-end gap-3">
-                  <div className="flex-1 relative">
-                     <Textarea 
-                       value={composerText}
-                       onChange={(e) => setComposerText(e.target.value)}
-                       placeholder={activeThread ? `Reply...` : "Type a message..."}
-                       className="min-h-[52px] max-h-[150px] py-4 pr-12 bg-slate-950/80 border-white/5 rounded-[26px] text-sm custom-scrollbar focus:ring-0 focus:border-white/10"
-                     />
-                     <button 
-                        onClick={() => fileInputRef.current?.click()} 
-                        disabled={!firebaseEnabled}
-                        className="absolute right-4 bottom-3.5 p-2 rounded-xl text-slate-600 hover:text-rose-400 transition-all disabled:opacity-30"
-                      >
-                        <Paperclip className="size-4" />
-                     </button>
-                  </div>
-                  <Button 
-                    disabled={!canSend}
-                    onClick={() => void onSend()}
-                    className="h-[52px] w-[52px] rounded-full bg-rose-600 hover:bg-rose-500 shadow-xl shadow-rose-950/20 p-0 flex items-center justify-center transition-all active:scale-90"
-                  >
-                    {sending ? <Loader2 className="size-6 animate-spin text-white" /> : <Send className="size-6 text-white" />}
-                  </Button>
-               </div>
-               
-               {attachmentFile && (
-                  <div className="mt-4 p-3 px-5 rounded-2xl bg-rose-500/5 border border-rose-500/10 flex items-center justify-between animate-fade-in">
-                     <div className="flex items-center gap-3 overflow-hidden">
-                        <Paperclip className="size-4 text-rose-500 shrink-0" />
-                        <span className="text-[10px] font-bold text-rose-200 truncate">{attachmentFile.name}</span>
-                     </div>
-                     <button onClick={removeAttachment} className="text-[10px] font-black text-rose-500 hover:text-rose-400 ml-4">REMOVE</button>
-                  </div>
-               )}
-               
-               {sendInfo && (
-                  <p className={`mt-3 text-[10px] font-bold uppercase tracking-widest text-center ${sendInfo.toLowerCase().includes('success') ? 'text-emerald-500' : 'text-rose-400'}`}>
-                    {sendInfo}
-                  </p>
-               )}
+                );
+              })
+            )}
+            <div ref={messageEndRef} />
+          </div>
+
+          {/* Input Bar */}
+          <div className="chat-input-bar">
+            {isNewChatMode && (
+              <div className="w-full mb-3">
+                <Label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5 block">Recipient</Label>
+                <Input value={manualTo} onChange={(e) => setManualTo(e.target.value)} placeholder="e.g. 9821012345" className="h-9 bg-zinc-800/80 font-mono text-xs" />
+                {manualTo.trim() && <p className="text-[10px] text-zinc-600 mt-1 font-mono">→ {normalizedManualTo}</p>}
+              </div>
+            )}
+            <div className="flex items-end gap-2 w-full">
+              <button onClick={() => fileInputRef.current?.click()} disabled={!firebaseEnabled} className="p-2.5 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-all disabled:opacity-30 flex-shrink-0" title="Attach file">
+                <Paperclip className="w-5 h-5" />
+              </button>
+              <div className="flex-1 relative">
+                <textarea
+                  value={composerText}
+                  onChange={(e) => setComposerText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && canSend) { e.preventDefault(); void onSend(); } }}
+                  placeholder={activeThread ? 'Type a message' : 'Type a message...'}
+                  className="w-full min-h-[42px] max-h-[120px] py-2.5 px-4 bg-zinc-800/80 border border-zinc-700/50 rounded-lg text-[13px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 resize-none"
+                  rows={1}
+                />
+              </div>
+              <button disabled={!canSend} onClick={() => void onSend()} className={`p-2.5 rounded-lg transition-all flex-shrink-0 ${canSend ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-zinc-800 text-zinc-600'}`} title="Send">
+                {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+              </button>
             </div>
           </div>
 
+          {/* Attachment Preview */}
+          {attachmentFile && (
+            <div className="px-4 pb-3 bg-[var(--bg-surface)]">
+              <div className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-800/50 border border-zinc-700/50">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Paperclip className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                  <span className="text-xs text-zinc-300 truncate">{attachmentFile.name}</span>
+                </div>
+                <button onClick={removeAttachment} className="text-zinc-500 hover:text-zinc-300 p-1"><X className="w-4 h-4" /></button>
+              </div>
+            </div>
+          )}
+
+          {/* Send Info */}
+          {sendInfo && (
+            <div className="px-4 pb-2 bg-[var(--bg-surface)]">
+              <p className={`text-[10px] font-medium text-center ${sendInfo.toLowerCase().includes('success') || sendInfo.toLowerCase().includes('sent') ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {sendInfo}
+              </p>
+            </div>
+          )}
         </div>
       </div>
-      <input 
-        ref={fileInputRef} 
-        type="file" 
-        className="hidden" 
-        onChange={(e) => {
-          const file = e.target.files?.[0] || null;
-          setAttachmentFile(file);
-          if (file) setAttachmentPreviewUrl(URL.createObjectURL(file));
-        }} 
-      />
+
+      <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => {
+        const file = e.target.files?.[0] || null;
+        setAttachmentFile(file);
+        if (file) setAttachmentPreviewUrl(URL.createObjectURL(file));
+      }} />
     </div>
   );
 }
