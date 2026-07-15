@@ -1,3 +1,5 @@
+import { getAuthIdToken } from '../lib/firebase';
+
 export type ExecutionStatus = 'idle' | 'running' | 'success' | 'error';
 
 export interface RunResult {
@@ -59,33 +61,32 @@ export interface N8nExecutionListItem {
 }
 
 const WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL as string | undefined;
-const N8N_API_URL = import.meta.env.VITE_N8N_API_URL as string | undefined;
-const N8N_API_KEY = import.meta.env.VITE_N8N_API_KEY as string | undefined;
 const API_PROXY_URL = import.meta.env.VITE_API_PROXY_URL as string | undefined;
 
 function isProxyUsable(url: string | undefined): boolean {
   if (!url) return false;
-  // In Firebase Hosting, `http://localhost:3001` refers to the end-user machine.
   return !url.includes('localhost') && !url.includes('127.0.0.1');
 }
 
 function getProxyBase(): string | null {
-  // Dev: allow explicit proxy URL (e.g. local express server)
   if (isProxyUsable(API_PROXY_URL)) return API_PROXY_URL!.replace(/\/$/, '');
-
-  // Prod: use same-origin Firebase Functions rewrite (/api/** -> function)
   if (import.meta.env.PROD) return '';
-
   return null;
 }
 
+async function authHeaders(): Promise<HeadersInit> {
+  const token = await getAuthIdToken();
+  if (!token) {
+    throw new Error('Not signed in. Please log in again.');
+  }
+  return { Authorization: `Bearer ${token}` };
+}
+
 /**
- * True if we can poll execution status.
- * Prefer the backend proxy (VITE_API_PROXY_URL) to avoid exposing API keys in the browser.
+ * True if we can poll execution status via the authenticated backend proxy.
+ * Never use a browser-exposed n8n API key.
  */
-export const canPollExecution = Boolean(
-  getProxyBase() !== null || (N8N_API_URL && N8N_API_KEY)
-);
+export const canPollExecution = getProxyBase() !== null || Boolean(import.meta.env.PROD);
 
 if (!WEBHOOK_URL) {
   // eslint-disable-next-line no-console
@@ -130,7 +131,7 @@ export async function triggerAutomation(params: {
   try {
     body = await response.json();
   } catch {
-    // ignore JSON parse errors; body stays null
+    // ignore
   }
 
   const data = body as Record<string, unknown> | null;
@@ -153,108 +154,49 @@ export async function triggerAutomation(params: {
   };
 }
 
-/** Poll n8n execution status (optional: set VITE_N8N_API_URL and VITE_N8N_API_KEY). */
+/** Poll n8n execution status via authenticated Cloud Function proxy. */
 export async function getExecutionStatus(executionId: string): Promise<N8nExecution | null> {
   const proxyBase = getProxyBase();
-  const directBase = N8N_API_URL?.replace(/\/$/, '');
-
-  const proxyUrl = proxyBase !== null
-    ? `${proxyBase}/api/n8n/executions/${encodeURIComponent(executionId)}`
-    : null;
-  const directUrl = directBase
-    ? `${directBase}/api/v1/executions/${encodeURIComponent(executionId)}`
-    : null;
-
-  // Prefer proxy always. In production we never want to fall back to direct calls
-  // because that triggers CORS and exposes the API key in the browser.
-  if (proxyUrl) {
-    const res = await fetch(proxyUrl).catch(() => null);
-    if (!res || !res.ok) return null;
-    return (await res.json()) as N8nExecution;
+  if (proxyBase === null && !import.meta.env.PROD) {
+    return null;
   }
+  const base = proxyBase === null ? '' : proxyBase;
+  const proxyUrl = `${base}/api/n8n/executions/${encodeURIComponent(executionId)}`;
 
-  // Direct fallback (dev only, when no proxy URL is available).
-  if (!proxyBase && directUrl && N8N_API_KEY) {
-    const res = await fetch(directUrl, {
-      headers: { 'X-N8N-API-KEY': N8N_API_KEY }
-    }).catch(() => null);
-    if (!res || !res.ok) return null;
+  try {
+    const res = await fetch(proxyUrl, { headers: await authHeaders() });
+    if (!res.ok) return null;
     return (await res.json()) as N8nExecution;
+  } catch {
+    return null;
   }
-
-  return null;
 }
 
-/**
- * Fetch a single execution with full runData included.
- * This is the same as getExecutionStatus but forces includeData=true.
- * Works via the proxy (which adds ?includeData=true server-side) or directly via API.
- */
 export async function fetchExecutionDetail(executionId: string): Promise<N8nExecution | null> {
-  const proxyBase = getProxyBase();
-  const directBase = N8N_API_URL?.replace(/\/$/, '');
-
-  const proxyUrl = proxyBase !== null
-    ? `${proxyBase}/api/n8n/executions/${encodeURIComponent(executionId)}`
-    : null;
-  const directUrl = directBase
-    ? `${directBase}/api/v1/executions/${encodeURIComponent(executionId)}?includeData=true`
-    : null;
-
-  if (proxyUrl) {
-    const res = await fetch(proxyUrl).catch(() => null);
-    if (!res || !res.ok) return null;
-    return (await res.json()) as N8nExecution;
-  }
-
-  if (!proxyBase && directUrl && N8N_API_KEY) {
-    const res = await fetch(directUrl, {
-      headers: { 'X-N8N-API-KEY': N8N_API_KEY }
-    }).catch(() => null);
-    if (!res || !res.ok) return null;
-    return (await res.json()) as N8nExecution;
-  }
-
-  return null;
+  return getExecutionStatus(executionId);
 }
 
-/** Fetch a list of recent n8n executions (via backend proxy). */
+/** Fetch a list of recent n8n executions (via authenticated backend proxy). */
 export async function listExecutions(
   limit = 10,
   workflowId?: string | null
 ): Promise<N8nExecutionListItem[] | null> {
   const proxyBase = getProxyBase();
-  const directBase = N8N_API_URL?.replace(/\/$/, '');
-
+  if (proxyBase === null && !import.meta.env.PROD) {
+    return null;
+  }
+  const base = proxyBase === null ? '' : proxyBase;
   const workflowParam = workflowId ? `&workflowId=${encodeURIComponent(workflowId)}` : '';
+  const proxyUrl = `${base}/api/n8n/executions?limit=${encodeURIComponent(limit)}${workflowParam}`;
 
-  const proxyUrl = proxyBase !== null
-    ? `${proxyBase}/api/n8n/executions?limit=${encodeURIComponent(limit)}${workflowParam}`
-    : null;
-  const directUrl = directBase
-    ? `${directBase}/api/v1/executions?limit=${encodeURIComponent(limit)}${workflowParam}`
-    : null;
-
-  // Prefer proxy always. In production we never want to fall back to direct calls.
-  if (proxyUrl) {
-    const res = await fetch(proxyUrl).catch(() => null);
-    if (!res || !res.ok) return null;
+  try {
+    const res = await fetch(proxyUrl, { headers: await authHeaders() });
+    if (!res.ok) return null;
     const json = (await res.json()) as { data?: N8nExecutionListItem[] } | N8nExecutionListItem[];
     if (Array.isArray(json)) return json;
     if (json && Array.isArray(json.data)) return json.data;
     return null;
-  }
-
-  if (!proxyBase && directUrl && N8N_API_KEY) {
-    const res = await fetch(directUrl, {
-      headers: { 'X-N8N-API-KEY': N8N_API_KEY }
-    }).catch(() => null);
-    if (!res || !res.ok) return null;
-    const json = (await res.json()) as { data?: N8nExecutionListItem[] } | N8nExecutionListItem[];
-    if (Array.isArray(json)) return json;
-    if (json && Array.isArray(json.data)) return json.data;
+  } catch {
     return null;
   }
-
-  return null;
 }

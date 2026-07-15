@@ -12,7 +12,14 @@ dist/
 # Firebase Functions local / deploy params (may contain Twilio defaults)
 functions/.env
 
+# Google service account keys
+service-account.json
+**/service-account*.json
+
 .tmp-twilio-secret-*
+
+# Local uploads
+uploads/
 
 # Editor / OS
 .DS_Store

@@ -9,7 +9,7 @@ import {
   setDoc,
   where
 } from 'firebase/firestore';
-import { getCurrentAuthUser, getDb, isFirebaseConfigured } from './firebase';
+import { ensureDataAuthSession, getCurrentAuthUser, getCurrentDataUser, getDb, isFirebaseConfigured } from './firebase';
 
 export type SalesFunnelExecutionStatus = 'success' | 'error' | 'waiting';
 
@@ -85,6 +85,13 @@ export function isFirebaseBackendAvailable(): boolean {
   return isFirebaseConfigured();
 }
 
+async function ensureDataUser() {
+  const authUser = getCurrentAuthUser();
+  if (!authUser) return null;
+  await ensureDataAuthSession(authUser);
+  return getCurrentDataUser() || authUser;
+}
+
 export async function fetchRecentSalesFunnelRuns(limitCount: number): Promise<
   Array<{
     run: SalesFunnelExecution;
@@ -94,7 +101,7 @@ export async function fetchRecentSalesFunnelRuns(limitCount: number): Promise<
 > {
   if (!isFirebaseConfigured()) return [];
 
-  const user = getCurrentAuthUser();
+  const user = await ensureDataUser();
   if (!user) return [];
 
   const db = getDb();
@@ -153,7 +160,7 @@ export async function fetchRecentSalesFunnelRuns(limitCount: number): Promise<
 export async function fetchRecentSalesFunnelLogs(limitCount: number): Promise<SalesFunnelLogEntry[]> {
   if (!isFirebaseConfigured()) return [];
 
-  const user = getCurrentAuthUser();
+  const user = await ensureDataUser();
   if (!user) return [];
 
   const db = getDb();
@@ -182,12 +189,16 @@ export async function fetchRecentSalesFunnelLogs(limitCount: number): Promise<Sa
 export async function createSalesFunnelRunWithLogs(input: SalesFunnelCreateRunInput): Promise<void> {
   if (!isFirebaseConfigured()) return;
 
+  const dataUser = await ensureDataUser();
+  if (!dataUser) return;
+
   const db = getDb();
+  const userId = dataUser.uid;
 
   const runDocRef = doc(db, RUNS_COLLECTION, input.runId);
   await setDoc(runDocRef, {
     id: input.runId,
-    userId: input.userId,
+    userId,
 
     city: input.city,
     queryPrefix: input.queryPrefix,
@@ -215,7 +226,7 @@ export async function createSalesFunnelRunWithLogs(input: SalesFunnelCreateRunIn
   const writes = input.logEntries.map((entry) => {
     const logId = `${input.runId}-${entry.at}-${Math.random().toString(16).slice(2)}`.slice(0, 200);
     return setDoc(doc(logsColRef, logId), {
-      userId: input.userId,
+      userId,
       runId: input.runId,
       type: entry.type,
       message: entry.message,

@@ -3,8 +3,10 @@
  * - Local dev: Express in `src/index.js` → `http://localhost:3001/twilio/*` (or `VITE_UPLOAD_API_URL`)
  * - Production + Firebase Hosting preview: same-origin `/api/twilio/*` (Hosting rewrites to Cloud Function `api`)
  *
- * Docs: https://www.twilio.com/docs/messaging
+ * All `/api/twilio/*` calls require a Firebase Auth Bearer token.
  */
+
+import { getAuthIdToken } from '../lib/firebase';
 
 function isProxyUsable(url: string | undefined): boolean {
   if (!url) return false;
@@ -27,7 +29,6 @@ function getTwilioRoot(): string {
   return `${upload.replace(/\/$/, '')}/twilio`;
 }
 
-/** Path beginning with `/` e.g. `/health`, `/messages`, `/messages/SMxx` — full URL or same-origin path for fetch. */
 function twilioUrl(pathAndQuery: string): string {
   const root = getTwilioRoot();
   const p = pathAndQuery.startsWith('/') ? pathAndQuery : `/${pathAndQuery}`;
@@ -35,6 +36,17 @@ function twilioUrl(pathAndQuery: string): string {
     return `${root.replace(/\/$/, '')}${p}`;
   }
   return `${root.replace(/\/$/, '')}${p}`;
+}
+
+async function authHeaders(extra?: HeadersInit): Promise<HeadersInit> {
+  const token = await getAuthIdToken();
+  if (!token) {
+    throw new Error('Not signed in. Please log in again.');
+  }
+  return {
+    ...(extra || {}),
+    Authorization: `Bearer ${token}`,
+  };
 }
 
 export type TwilioMessage = {
@@ -73,12 +85,12 @@ export type ListMessagesResult = {
 };
 
 export async function fetchTwilioHealth(): Promise<TwilioHealth> {
-  const r = await fetch(twilioUrl('/health'));
+  const r = await fetch(twilioUrl('/health'), { headers: await authHeaders() });
   const data = (await r.json().catch(() => ({}))) as TwilioHealth & { message?: string };
   if (!r.ok) {
     throw new Error(typeof data.message === 'string' ? data.message : 'Twilio health check failed');
   }
-  return { ok: data.ok, accountHint: data.accountHint, source: data.source };
+  return { ok: data.ok, accountHint: data.accountHint ?? null, source: data.source };
 }
 
 export async function listTwilioMessages(options: {
@@ -93,7 +105,7 @@ export async function listTwilioMessages(options: {
   const qs = q.toString();
   const path = qs ? `/messages?${qs}` : '/messages';
 
-  const r = await fetch(twilioUrl(path));
+  const r = await fetch(twilioUrl(path), { headers: await authHeaders() });
   const data = (await r.json().catch(() => ({}))) as ListMessagesResult & { message?: string };
   if (!r.ok) {
     throw new Error(typeof data.message === 'string' ? data.message : 'Failed to list messages');
@@ -105,7 +117,9 @@ export async function listTwilioMessages(options: {
 }
 
 export async function getTwilioMessage(sid: string): Promise<TwilioMessage> {
-  const r = await fetch(twilioUrl(`/messages/${encodeURIComponent(sid)}`));
+  const r = await fetch(twilioUrl(`/messages/${encodeURIComponent(sid)}`), {
+    headers: await authHeaders(),
+  });
   const data = (await r.json().catch(() => ({}))) as TwilioMessage & { message?: string };
   if (!r.ok) {
     throw new Error(typeof data.message === 'string' ? data.message : 'Failed to load message');
@@ -122,16 +136,22 @@ export async function sendTwilioMessage(payload: {
 }): Promise<TwilioMessage> {
   const r = await fetch(twilioUrl('/messages'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    headers: await authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({
+      to: payload.to,
+      body: payload.body,
+      mediaUrl: payload.mediaUrl,
+      // from / messagingServiceSid are ignored server-side (server secrets only)
+    }),
   });
   const data = (await r.json().catch(() => ({}))) as TwilioMessage & { message?: string };
   if (!r.ok) {
-    const message = typeof (data as any).message === 'string' ? (data as any).message : 'Send failed';
-    const code = (data as any).code ? ` (code: ${(data as any).code})` : '';
-    if ((data as any).raw) {
-      return Promise.reject(new Error(`${message}${code}`));
-    }
+    const message = typeof (data as { message?: string }).message === 'string'
+      ? (data as { message: string }).message
+      : 'Send failed';
+    const code = (data as { code?: string | number }).code
+      ? ` (code: ${(data as { code: string | number }).code})`
+      : '';
     throw new Error(`${message}${code}`);
   }
   return data;

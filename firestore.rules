@@ -825,12 +825,10 @@ service cloud.firestore {
     
     // Production logs - for debugging and monitoring
     match /production_logs/{logId} {
-      // Allow create from any client (including unauthenticated) so error-boundary and
-      // pre-login errors (e.g. on /login) are captured; read remains admin-only.
-      allow create: if true;
-      // Admin and superadmin can read logs (for the admin UI)
+      allow create: if isAuthenticated()
+        && request.resource.data.keys().hasOnly(['message', 'level', 'at', 'userId', 'path', 'stack'])
+        && request.resource.data.userId == request.auth.uid;
       allow read: if isAdminOrSuperadmin();
-      // No updates or deletes allowed (logs are immutable)
       allow update, delete: if false;
     }
   }

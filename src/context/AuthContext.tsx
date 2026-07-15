@@ -8,6 +8,9 @@ import {
   fetchUserRole,
   fetchUserDisplayName,
   isAuthConfigured,
+  isFirebaseConfigured,
+  ensureDataAuthSession,
+  signOutDataAuth,
   type FirebaseUser,
 } from '../lib/firebase';
 
@@ -34,6 +37,15 @@ async function buildAppUser(fbUser: FirebaseUser): Promise<User> {
   };
 }
 
+async function bridgeDataAuth(fbUser: FirebaseUser): Promise<void> {
+  if (!isFirebaseConfigured()) return;
+  try {
+    await ensureDataAuthSession(fbUser);
+  } catch (e) {
+    console.warn('Data Firebase auth bridge failed (Firestore/Storage may deny until fixed):', e);
+  }
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
@@ -49,11 +61,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
         setFirebaseUser(fbUser);
+        await bridgeDataAuth(fbUser);
         const appUser = await buildAppUser(fbUser);
         setUser(appUser);
       } else {
         setFirebaseUser(null);
         setUser(null);
+        void signOutDataAuth();
       }
       setIsLoading(false);
     });
@@ -66,6 +80,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const auth = getAuthInstance();
       const credential = await signInWithEmailAndPassword(auth, email, password);
+      await bridgeDataAuth(credential.user);
       const appUser = await buildAppUser(credential.user);
       setFirebaseUser(credential.user);
       setUser(appUser);
@@ -90,6 +105,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const logout = () => {
     const auth = getAuthInstance();
+    void signOutDataAuth();
     signOut(auth);
     setUser(null);
     setFirebaseUser(null);

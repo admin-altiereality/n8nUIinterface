@@ -1,11 +1,7 @@
 /**
- * Import function triggers from their respective submodules:
- *
- * import {onCall} from "firebase-functions/v2/https";
- * import {onDocumentWritten} from "firebase-functions/v2/firestore";
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
+ * LearnXR agents API — n8n + Twilio proxies with Firebase Auth.
  */
+// @ts-nocheck — Express 5 handler return typings conflict with firebase-functions overlays.
 
 import { setGlobalOptions } from "firebase-functions";
 import { onRequest } from "firebase-functions/https";
@@ -13,20 +9,10 @@ import * as logger from "firebase-functions/logger";
 import cors from "cors";
 import express from "express";
 import { defineSecret } from "firebase-functions/params";
+import { getApps, initializeApp } from "firebase-admin/app";
+import { getAuth as getAdminAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
 
-// Start writing functions
-// https://firebase.google.com/docs/functions/typescript
-
-// For cost control, you can set the maximum number of containers that can be
-// running at the same time. This helps mitigate the impact of unexpected
-// traffic spikes by instead downgrading performance. This limit is a
-// per-function limit. You can override the limit for each function using the
-// `maxInstances` option in the function's options, e.g.
-// `onRequest({ maxInstances: 5 }, (req, res) => { ... })`.
-// NOTE: setGlobalOptions does not apply to functions using the v1 API. V1
-// functions should each use functions.runWith({ maxInstances: 10 }) instead.
-// In the v1 API, each function can only serve one request per container, so
-// this will be the maximum concurrent request count.
 setGlobalOptions({ maxInstances: 10 });
 
 type N8nProxyConfig = {
@@ -34,14 +20,80 @@ type N8nProxyConfig = {
   apiKey?: string;
 };
 
+type AuthedUser = {
+  uid: string;
+  email?: string;
+  role: string;
+};
+
 const n8nApiUrlSecret = defineSecret("N8N_API_URL_SECRET");
 const n8nApiKeySecret = defineSecret("N8N_API_KEY_SECRET");
 
 const twilioAccountSidSecret = defineSecret("TWILIO_ACCOUNT_SID");
 const twilioAuthTokenSecret = defineSecret("TWILIO_AUTH_TOKEN");
-/** Optional outbound defaults (set in `.env` for emulators or with `firebase functions:config:export` / Cloud console). */
 const twilioMessagingServiceSidSecret = defineSecret("TWILIO_MESSAGING_SERVICE_SID_SECRET");
 const twilioWhatsappFromSecret = defineSecret("TWILIO_WHATSAPP_FROM_SECRET");
+
+const AUTH_FIREBASE_PROJECT_ID =
+  process.env.AUTH_FIREBASE_PROJECT_ID || "learnxr-evoneuralai";
+
+/** Roles allowed to use this agents platform at all (data-token + APIs). */
+const AGENT_ROLES = new Set([
+  "superadmin",
+  "associate",
+  "builder",
+  "salesperson",
+  "whatsapp_manager",
+]);
+
+const TWILIO_ROLES = new Set(["superadmin", "associate", "whatsapp_manager"]);
+const N8N_ROLES = new Set(["superadmin", "associate", "builder"]);
+
+const CORS_ALLOWED_ORIGINS = new Set([
+  "https://agents.altiereality.com",
+  "https://agents-altiereality-com.web.app",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+]);
+
+function isAllowedCorsOrigin(origin: string | undefined): boolean {
+  if (!origin) return true; // same-origin / non-browser
+  if (CORS_ALLOWED_ORIGINS.has(origin)) return true;
+  // Firebase Hosting preview channels for this site
+  if (/^https:\/\/agents-altiereality-com--[\w-]+\.web\.app$/.test(origin)) return true;
+  return false;
+}
+
+function ensureAdminDefaultApp() {
+  if (!getApps().length) {
+    initializeApp();
+  }
+}
+
+function getAuthProjectApp() {
+  ensureAdminDefaultApp();
+  const name = "auth-verifier";
+  const existing = getApps().find((a) => a.name === name);
+  return existing || initializeApp({ projectId: AUTH_FIREBASE_PROJECT_ID }, name);
+}
+
+function getAuthProjectVerifier() {
+  return getAdminAuth(getAuthProjectApp());
+}
+
+function getAuthProjectDb() {
+  return getFirestore(getAuthProjectApp());
+}
+
+function getDataProjectAuth() {
+  ensureAdminDefaultApp();
+  return getAdminAuth();
+}
+
+function getDataProjectDb() {
+  ensureAdminDefaultApp();
+  return getFirestore();
+}
 
 function getN8nConfig(): N8nProxyConfig {
   return {
@@ -78,24 +130,192 @@ function getTwilioConfig():
   };
 }
 
+async function resolveRole(
+  uid: string,
+  decoded: Record<string, unknown>,
+  idToken?: string
+): Promise<string | null> {
+  const claimRole = decoded.role || decoded.userRole;
+  if (typeof claimRole === "string" && claimRole.trim()) return claimRole.trim();
+
+  // Prefer local (lexrn1) mirror written during data-token exchange
+  try {
+    const local = await getDataProjectDb().collection("users").doc(uid).get();
+    if (local.exists) {
+      const d = local.data() || {};
+      const r = d.role || d.userRole;
+      if (typeof r === "string" && r.trim()) return r.trim();
+    }
+  } catch (err) {
+    logger.warn("lexrn1 role lookup failed", err);
+  }
+
+  // Auth project via Admin SDK (needs SA access on learnxr-evoneuralai)
+  try {
+    const remote = await getAuthProjectDb().collection("users").doc(uid).get();
+    if (remote.exists) {
+      const d = remote.data() || {};
+      const r = d.role || d.userRole;
+      if (typeof r === "string" && r.trim()) return r.trim();
+    }
+  } catch (err) {
+    logger.warn("auth-project admin role lookup failed", err);
+  }
+
+  // Fallback: read users/{uid} as the end-user (their token already allows own-doc read)
+  if (idToken) {
+    try {
+      const url =
+        `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(AUTH_FIREBASE_PROJECT_ID)}` +
+        `/databases/(default)/documents/users/${encodeURIComponent(uid)}`;
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${idToken}` } });
+      if (resp.ok) {
+        const doc = (await resp.json()) as {
+          fields?: { role?: { stringValue?: string }; userRole?: { stringValue?: string } };
+        };
+        const r = doc.fields?.role?.stringValue || doc.fields?.userRole?.stringValue;
+        if (typeof r === "string" && r.trim()) return r.trim();
+      }
+    } catch (err) {
+      logger.warn("auth-project user-token role lookup failed", err);
+    }
+  }
+
+  return null;
+}
+
+async function authenticateRequest(req: express.Request): Promise<AuthedUser | { error: string; status: number }> {
+  const header = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  if (!match?.[1]) {
+    return { error: "Missing Authorization Bearer token.", status: 401 };
+  }
+
+  const idToken = match[1];
+  try {
+    const decoded = await getAuthProjectVerifier().verifyIdToken(idToken);
+    if (!decoded.uid) {
+      return { error: "Invalid ID token.", status: 401 };
+    }
+    const role = await resolveRole(decoded.uid, decoded as unknown as Record<string, unknown>, idToken);
+    if (!role || !AGENT_ROLES.has(role)) {
+      return { error: "Forbidden: agent role required.", status: 403 };
+    }
+    return {
+      uid: decoded.uid,
+      email: typeof decoded.email === "string" ? decoded.email : undefined,
+      role,
+    };
+  } catch (err) {
+    logger.warn("authenticateRequest failed", err);
+    return { error: "Unauthorized.", status: 401 };
+  }
+}
+
+function requireRoles(allowed: Set<string>) {
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const auth = await authenticateRequest(req);
+    if ("error" in auth) {
+      return res.status(auth.status).json({ message: auth.error });
+    }
+    if (!allowed.has(auth.role)) {
+      return res.status(403).json({ message: "Forbidden: insufficient role." });
+    }
+    (req as express.Request & { authedUser?: AuthedUser }).authedUser = auth;
+    return next();
+  };
+}
+
+function isAllowedMediaUrl(mediaUrl: string): boolean {
+  try {
+    const u = new URL(mediaUrl);
+    if (u.protocol !== "https:") return false;
+    const host = u.hostname.toLowerCase();
+    return (
+      host === "firebasestorage.googleapis.com" ||
+      host.endsWith(".firebasestorage.app") ||
+      host === "storage.googleapis.com"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isValidWhatsAppRecipient(to: string): boolean {
+  // whatsapp:+E164 or +E164
+  return /^(whatsapp:)?\+[1-9]\d{7,14}$/i.test(to.trim());
+}
+
 const app = express();
-app.use(cors({ origin: true }));
-app.options(/.*/, cors({ origin: true }));
+app.use(
+  cors({
+    origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+  })
+);
+app.options(/.*/, cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
 app.use(express.json({ limit: "256kb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// Explicitly handle CORS preflight for the proxy endpoints.
-app.options("/api/n8n/executions", cors({ origin: true }));
-app.options("/api/n8n/executions/:id", cors({ origin: true }));
+/**
+ * Bridge: Auth-project ID token → lexrn1 custom token (same uid), role-gated.
+ */
+app.options("/api/auth/data-token", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+app.post("/api/auth/data-token", async (req, res) => {
+  const auth = await authenticateRequest(req);
+  if ("error" in auth) {
+    return res.status(auth.status).json({ message: auth.error });
+  }
 
-app.get("/api/n8n/executions", async (req, res) => {
+  try {
+    // Mirror role onto lexrn1 for Storage/API role checks without cross-project reads later
+    await getDataProjectDb()
+      .collection("users")
+      .doc(auth.uid)
+      .set(
+        {
+          role: auth.role,
+          email: auth.email || null,
+          authProjectId: AUTH_FIREBASE_PROJECT_ID,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+
+    const customToken = await getDataProjectAuth().createCustomToken(auth.uid, {
+      authProjectId: AUTH_FIREBASE_PROJECT_ID,
+      role: auth.role,
+    });
+    return res.json({ customToken, uid: auth.uid, role: auth.role });
+  } catch (err) {
+    logger.error("data-token exchange failed", err);
+    return res.status(401).json({ message: "Failed to exchange auth token." });
+  }
+});
+
+app.options("/api/n8n/executions", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+app.options("/api/n8n/executions/:id", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+
+app.get("/api/n8n/executions", requireRoles(N8N_ROLES), async (req, res) => {
   const { apiUrl, apiKey } = getN8nConfig();
   if (!apiUrl || !apiKey) {
     return res.status(500).json({ message: "n8n proxy not configured (missing api url/key)." });
   }
 
-  const takeRaw = typeof req.query.limit === "string" ? req.query.limit : typeof req.query.take === "string" ? req.query.take : "10";
+  const takeRaw =
+    typeof req.query.limit === "string"
+      ? req.query.limit
+      : typeof req.query.take === "string"
+        ? req.query.take
+        : "10";
   const takeNum = Number.parseInt(takeRaw, 10);
   const take = Number.isFinite(takeNum) ? Math.min(Math.max(takeNum, 1), 100) : 10;
 
@@ -103,8 +323,8 @@ app.get("/api/n8n/executions", async (req, res) => {
     typeof req.query.workflowId === "string"
       ? req.query.workflowId
       : typeof req.query.workflow === "string"
-      ? req.query.workflow
-      : undefined;
+        ? req.query.workflow
+        : undefined;
 
   const base = apiUrl.replace(/\/$/, "");
   const workflowParam = workflowId ? `&workflowId=${encodeURIComponent(workflowId)}` : "";
@@ -119,7 +339,6 @@ app.get("/api/n8n/executions", async (req, res) => {
     res.status(upstream.status);
     res.setHeader("content-type", upstream.headers.get("content-type") ?? "application/json");
 
-    // Try to pass through JSON
     try {
       return res.send(JSON.stringify(JSON.parse(text)));
     } catch {
@@ -131,7 +350,7 @@ app.get("/api/n8n/executions", async (req, res) => {
   }
 });
 
-app.get("/api/n8n/executions/:id", async (req, res) => {
+app.get("/api/n8n/executions/:id", requireRoles(N8N_ROLES), async (req, res) => {
   const { apiUrl, apiKey } = getN8nConfig();
   if (!apiUrl || !apiKey) {
     return res.status(500).json({ message: "n8n proxy not configured (missing api url/key)." });
@@ -159,26 +378,22 @@ app.get("/api/n8n/executions/:id", async (req, res) => {
   }
 });
 
-// ── Twilio Programmable Messaging (Hosting + preview channels: `/api/twilio/**` → this function)
+app.options("/api/twilio/messages", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+app.options("/api/twilio/messages/:sid", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
 
-app.options("/api/twilio/messages", cors({ origin: true }));
-app.options("/api/twilio/messages/:sid", cors({ origin: true }));
-
-app.get("/api/twilio/health", (_req, res) => {
+app.get("/api/twilio/health", requireRoles(TWILIO_ROLES), (_req, res) => {
   const t = getTwilioConfig();
-  if (!t.ok) {
-    return res.json({
-      ok: false,
-      accountHint: null,
-      source: "firebase-functions",
-    });
-  }
-  const hint =
-    t.accountSid.length > 6 ? `${t.accountSid.slice(0, 2)}…${t.accountSid.slice(-4)}` : t.accountSid;
-  return res.json({ ok: true, accountHint: hint, source: "firebase-functions" });
+  return res.json({
+    ok: t.ok,
+    source: "firebase-functions",
+  });
 });
 
-app.get("/api/twilio/messages", async (req, res) => {
+app.get("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) => {
   const t = getTwilioConfig();
   if (!t.ok) {
     return res.status(503).json({
@@ -225,13 +440,17 @@ app.get("/api/twilio/messages", async (req, res) => {
   }
 });
 
-app.get("/api/twilio/messages/:sid", async (req, res) => {
+app.get("/api/twilio/messages/:sid", requireRoles(TWILIO_ROLES), async (req, res) => {
   const t = getTwilioConfig();
   if (!t.ok) {
     return res.status(503).json({ message: "Twilio is not configured on this function." });
   }
 
   const { sid } = req.params;
+  if (!/^SM[a-f0-9]{32}$/i.test(sid) && !/^MM[a-f0-9]{32}$/i.test(sid)) {
+    return res.status(400).json({ message: "Invalid message SID." });
+  }
+
   const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(
     t.accountSid
   )}/Messages/${encodeURIComponent(sid)}.json`;
@@ -259,7 +478,7 @@ app.get("/api/twilio/messages/:sid", async (req, res) => {
   }
 });
 
-app.post("/api/twilio/messages", async (req, res) => {
+app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) => {
   const t = getTwilioConfig();
   if (!t.ok) {
     return res.status(503).json({ message: "Twilio is not configured on this function." });
@@ -286,17 +505,26 @@ app.post("/api/twilio/messages", async (req, res) => {
       message: `Missing required fields (Twilio send): toPresent=${Boolean(to)} hasBody=${hasBody} hasMedia=${hasMedia}`,
     });
   }
+  if (!isValidWhatsAppRecipient(to)) {
+    return res.status(400).json({ message: "Invalid recipient. Use whatsapp:+E164 or +E164." });
+  }
+  if (hasMedia && !isAllowedMediaUrl(mediaUrl)) {
+    return res.status(400).json({
+      message: "mediaUrl must be an https URL on Firebase Storage / Google Cloud Storage.",
+    });
+  }
+  // Do not allow clients to override sender identity — use server secrets only
+  messagingServiceSid = t.messagingServiceSid || "";
+  from = t.whatsappFrom || "";
   if (!messagingServiceSid && !from) {
     return res.status(400).json({
       message:
-        "Provide `from` or `messagingServiceSid`, or set TWILIO_MESSAGING_SERVICE_SID / TWILIO_WHATSAPP_FROM on the api function.",
+        "Server sender not configured. Set TWILIO_MESSAGING_SERVICE_SID / TWILIO_WHATSAPP_FROM on the api function.",
     });
   }
 
   const params = new URLSearchParams();
   params.set("To", to);
-  // Twilio media sends are more reliable when Body is present (even a single space),
-  // especially for WhatsApp/doc-style messages.
   if (hasBody) params.set("Body", bodyText);
   else if (hasMedia) params.set("Body", " ");
   if (messagingServiceSid) params.set("MessagingServiceSid", messagingServiceSid);
@@ -328,7 +556,6 @@ app.post("/api/twilio/messages", async (req, res) => {
       return res.status(apiRes.status).json({
         message: (data.message as string) || (data.more_info as string) || "Twilio send failed",
         code: data.code,
-        raw: data,
       });
     }
     return res.status(201).json(data);
@@ -338,21 +565,23 @@ app.post("/api/twilio/messages", async (req, res) => {
   }
 });
 
-// Fallback: some hosting rewrites can change the effective path prefix.
-// If the URL contains /n8n/executions, proxy it regardless of the exact Express route match.
+// Auth-gated fallback for hosting rewrite path variants (n8n only)
 app.get(/.*/, async (req, res) => {
-  const originalUrl = req.originalUrl || req.url || '';
-  // Let unknown /api/twilio/* fall through to 404
+  const originalUrl = req.originalUrl || req.url || "";
   if (originalUrl.includes("/api/twilio")) {
     return res.status(404).send(`Cannot GET ${req.path}`);
   }
-  // Match both:
-  // - /api/n8n/executions
-  // - /api/n8n/executions/:id
-  // (and any potential rewrite variants where /api prefix may differ)
   const m = originalUrl.match(/n8n\/executions(?:\/([^/?#]+))?/);
   if (!m) {
     return res.status(404).send(`Cannot GET ${req.path}`);
+  }
+
+  const auth = await authenticateRequest(req);
+  if ("error" in auth) {
+    return res.status(auth.status).json({ message: auth.error });
+  }
+  if (!N8N_ROLES.has(auth.role)) {
+    return res.status(403).json({ message: "Forbidden: insufficient role." });
   }
 
   const { apiUrl, apiKey } = getN8nConfig();
@@ -361,7 +590,7 @@ app.get(/.*/, async (req, res) => {
   }
 
   const base = apiUrl.replace(/\/$/, "");
-  const id = m[2];
+  const id = m[1];
 
   try {
     if (!id) {
@@ -369,8 +598,8 @@ app.get(/.*/, async (req, res) => {
         typeof req.query.limit === "string"
           ? req.query.limit
           : typeof req.query.take === "string"
-          ? req.query.take
-          : "10";
+            ? req.query.take
+            : "10";
       const takeNum = Number.parseInt(takeRaw, 10);
       const take = Number.isFinite(takeNum) ? Math.min(Math.max(takeNum, 1), 100) : 10;
 
@@ -378,8 +607,8 @@ app.get(/.*/, async (req, res) => {
         typeof req.query.workflowId === "string"
           ? req.query.workflowId
           : typeof req.query.workflow === "string"
-          ? req.query.workflow
-          : undefined;
+            ? req.query.workflow
+            : undefined;
       const workflowParam = workflowId ? `&workflowId=${encodeURIComponent(workflowId)}` : "";
 
       const url = `${base}/api/v1/executions?limit=${encodeURIComponent(take)}${workflowParam}`;
@@ -413,6 +642,7 @@ app.get(/.*/, async (req, res) => {
 
 export const api = onRequest(
   {
+    invoker: "public",
     secrets: [
       n8nApiUrlSecret,
       n8nApiKeySecret,

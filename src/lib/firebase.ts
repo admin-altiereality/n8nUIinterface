@@ -1,5 +1,13 @@
 import { getApps, initializeApp, type FirebaseApp } from 'firebase/app';
-import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, type User as FirebaseUser, type Auth } from 'firebase/auth';
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  signInWithCustomToken,
+  signOut,
+  onAuthStateChanged,
+  type User as FirebaseUser,
+  type Auth,
+} from 'firebase/auth';
 import { getFirestore, doc, getDoc, type Firestore } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
@@ -104,6 +112,8 @@ export async function fetchUserDisplayName(uid: string, fallback?: string): Prom
 // ─── Data App (lexrn1) — for Firestore runs/logs and Storage ───
 let dataApp: FirebaseApp | null = null;
 let dataDb: Firestore | null = null;
+let dataAuthInstance: Auth | null = null;
+let dataAuthBridgePromise: Promise<void> | null = null;
 
 function getDataConfigFromEnv(): FirebaseConfig | null {
   const apiKey = import.meta.env.VITE_FIREBASE_API_KEY as string | undefined;
@@ -135,10 +145,86 @@ function getOrCreateDataApp(): FirebaseApp {
   return dataApp;
 }
 
+export function getDataAuth(): Auth {
+  if (dataAuthInstance) return dataAuthInstance;
+  dataAuthInstance = getAuth(getOrCreateDataApp());
+  return dataAuthInstance;
+}
+
 export function getDb(): Firestore {
   if (dataDb) return dataDb;
   dataDb = getFirestore(getOrCreateDataApp());
   return dataDb;
+}
+
+function dataTokenUrl(): string {
+  if (import.meta.env.PROD) return '/api/auth/data-token';
+
+  const proxy = import.meta.env.VITE_API_PROXY_URL as string | undefined;
+  if (proxy && !proxy.includes('localhost') && !proxy.includes('127.0.0.1')) {
+    return `${proxy.replace(/\/$/, '')}/api/auth/data-token`;
+  }
+
+  const upload = (import.meta.env.VITE_UPLOAD_API_URL as string | undefined) || '';
+  if (upload && !upload.includes('localhost') && !upload.includes('127.0.0.1')) {
+    return `${upload.replace(/\/$/, '')}/api/auth/data-token`;
+  }
+
+  return '/api/auth/data-token';
+}
+
+/**
+ * Ensure the data Firebase app has Auth so Firestore/Storage rules see request.auth.
+ * Exchanges the Auth-project ID token for a lexrn1 custom token (same uid).
+ */
+export async function ensureDataAuthSession(authUser: FirebaseUser): Promise<void> {
+  if (!isFirebaseConfigured()) return;
+
+  const dataAuth = getDataAuth();
+  if (dataAuth.currentUser?.uid === authUser.uid) return;
+
+  if (dataAuthBridgePromise) {
+    await dataAuthBridgePromise;
+    return;
+  }
+
+  dataAuthBridgePromise = (async () => {
+    const idToken = await authUser.getIdToken();
+    const res = await fetch(dataTokenUrl(), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    const body = (await res.json().catch(() => ({}))) as { customToken?: string; message?: string };
+    if (!res.ok || !body.customToken) {
+      throw new Error(body.message || 'Failed to establish data Firebase session.');
+    }
+    await signInWithCustomToken(dataAuth, body.customToken);
+  })();
+
+  try {
+    await dataAuthBridgePromise;
+  } finally {
+    dataAuthBridgePromise = null;
+  }
+}
+
+export async function signOutDataAuth(): Promise<void> {
+  if (!isFirebaseConfigured()) return;
+  try {
+    await signOut(getDataAuth());
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Get a fresh ID token from the Auth Firebase app (for Cloud Function Authorization headers).
+ */
+export async function getAuthIdToken(forceRefresh = false): Promise<string | null> {
+  if (!isAuthConfigured()) return null;
+  const user = getAuthInstance().currentUser;
+  if (!user) return null;
+  return user.getIdToken(forceRefresh);
 }
 
 /**
@@ -150,6 +236,12 @@ export function getCurrentAuthUser(): FirebaseUser | null {
   return auth.currentUser;
 }
 
+/** Prefer data-app Auth when present (matches Firestore/Storage request.auth). */
+export function getCurrentDataUser(): FirebaseUser | null {
+  if (!isFirebaseConfigured()) return getCurrentAuthUser();
+  return getDataAuth().currentUser || getCurrentAuthUser();
+}
+
 export async function uploadTwilioMediaToStorage(file: File, opts?: { pathPrefix?: string }): Promise<{
   downloadUrl: string;
   storagePath: string;
@@ -159,11 +251,16 @@ export async function uploadTwilioMediaToStorage(file: File, opts?: { pathPrefix
   }
 
   const authUser = getCurrentAuthUser();
+  if (authUser) {
+    await ensureDataAuthSession(authUser);
+  }
+
+  const dataUser = getCurrentDataUser();
   const app = getOrCreateDataApp();
   const storage = getStorage(app);
 
   const prefix = opts?.pathPrefix || 'twilio-media';
-  const uid = authUser?.uid || 'anon';
+  const uid = dataUser?.uid || authUser?.uid || 'anon';
   const safeName = String(file.name || 'upload').replace(/[^\w.-]+/g, '_');
   const storagePath = `${prefix}/${uid}/${Date.now()}-${safeName}`;
 
