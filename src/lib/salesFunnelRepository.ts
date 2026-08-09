@@ -30,6 +30,8 @@ export interface SalesFunnelExecution {
   startedAt: string;
   stoppedAt?: string;
   nodes: SalesFunnelExecutionNode[];
+  /** Real n8n execution id when available */
+  n8nExecutionId?: string;
 }
 
 export interface SalesFunnelHistoryItem {
@@ -64,6 +66,8 @@ export interface SalesFunnelCreateRunInput {
 
   nodes: SalesFunnelExecutionNode[];
   logEntries: SalesFunnelLogEntry[];
+  status?: SalesFunnelExecutionStatus;
+  n8nExecutionId?: string;
 }
 
 const RUNS_COLLECTION = 'salesFunnelRuns';
@@ -89,7 +93,24 @@ async function ensureDataUser() {
   const authUser = getCurrentAuthUser();
   if (!authUser) return null;
   await ensureDataAuthSession(authUser);
-  return getCurrentDataUser() || authUser;
+  return getCurrentDataUser();
+}
+
+function isPermissionDenied(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    String((error as { code?: unknown }).code) === 'permission-denied'
+  );
+}
+
+function warnDataBackendUnavailable(operation: string, error: unknown): void {
+  if (isPermissionDenied(error)) {
+    console.warn(`[sales-funnel] Data Firebase session is unavailable; skipping ${operation}.`);
+    return;
+  }
+  console.warn(`[sales-funnel] Failed to ${operation}.`, error);
 }
 
 export async function fetchRecentSalesFunnelRuns(limitCount: number): Promise<
@@ -112,7 +133,11 @@ export async function fetchRecentSalesFunnelRuns(limitCount: number): Promise<
     fsLimit(limitCount)
   );
 
-  const snapshots = await getDocs(runsQuery);
+  const snapshots = await getDocs(runsQuery).catch((error) => {
+    warnDataBackendUnavailable('load recent runs', error);
+    return null;
+  });
+  if (!snapshots) return [];
   const items: Array<{
     run: SalesFunnelExecution;
     history: SalesFunnelHistoryItem;
@@ -130,11 +155,13 @@ export async function fetchRecentSalesFunnelRuns(limitCount: number): Promise<
 
     const run: SalesFunnelExecution = {
       id: runId,
-      status: status === 'error' ? 'error' : 'success',
+      status:
+        status === 'error' ? 'error' : status === 'waiting' ? 'waiting' : 'success',
       mode: data.mode ? String(data.mode) : undefined,
       startedAt,
       stoppedAt,
-      nodes
+      nodes,
+      n8nExecutionId: data.n8nExecutionId ? String(data.n8nExecutionId) : undefined,
     };
 
     const history: SalesFunnelHistoryItem = {
@@ -171,7 +198,11 @@ export async function fetchRecentSalesFunnelLogs(limitCount: number): Promise<Sa
     fsLimit(limitCount)
   );
 
-  const snapshots = await getDocs(logsQuery);
+  const snapshots = await getDocs(logsQuery).catch((error) => {
+    warnDataBackendUnavailable('load recent logs', error);
+    return null;
+  });
+  if (!snapshots) return [];
   const items: SalesFunnelLogEntry[] = [];
 
   snapshots.forEach((snap) => {
@@ -214,12 +245,13 @@ export async function createSalesFunnelRunWithLogs(input: SalesFunnelCreateRunIn
     responseStatus: input.responseStatus,
     responseBody: input.responseBody,
 
-    status: input.ok ? 'success' : 'error',
+    status: input.status || (input.ok ? 'success' : 'error'),
     mode: 'ui-trigger',
     nodes: input.nodes,
+    n8nExecutionId: input.n8nExecutionId || null,
 
     createdAt: serverTimestamp()
-  });
+  }).catch((error) => warnDataBackendUnavailable('save run', error));
 
   // Logs are stored independently so the run doc doesn't grow without bound.
   const logsColRef = collection(db, LOGS_COLLECTION);
@@ -235,6 +267,30 @@ export async function createSalesFunnelRunWithLogs(input: SalesFunnelCreateRunIn
     });
   });
 
-  await Promise.all(writes);
+  await Promise.all(writes).catch((error) => warnDataBackendUnavailable('save logs', error));
 }
 
+export async function updateSalesFunnelRun(
+  runId: string,
+  patch: {
+    status?: SalesFunnelExecutionStatus;
+    stoppedAt?: string;
+    ok?: boolean;
+    nodes?: SalesFunnelExecutionNode[];
+    n8nExecutionId?: string;
+    responseBody?: string;
+  }
+): Promise<void> {
+  if (!isFirebaseConfigured()) return;
+  const dataUser = await ensureDataUser();
+  if (!dataUser) return;
+  const db = getDb();
+  await setDoc(
+    doc(db, RUNS_COLLECTION, runId),
+    {
+      ...patch,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  ).catch((error) => warnDataBackendUnavailable('update run', error));
+}

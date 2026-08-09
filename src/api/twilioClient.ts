@@ -3,7 +3,7 @@
  * - Local dev: Express in `src/index.js` → `http://localhost:3001/twilio/*` (or `VITE_UPLOAD_API_URL`)
  * - Production + Firebase Hosting preview: same-origin `/api/twilio/*` (Hosting rewrites to Cloud Function `api`)
  *
- * All `/api/twilio/*` calls require a Firebase Auth Bearer token.
+ * All `/api/twilio/*` calls require a Firebase Auth Bearer token (except StatusCallback).
  */
 
 import { getAuthIdToken } from '../lib/firebase';
@@ -73,6 +73,17 @@ export type TwilioMessage = {
   }>;
 };
 
+export type TwilioMessageStatusDoc = {
+  sid: string;
+  to?: string | null;
+  from?: string | null;
+  status: string;
+  errorCode?: string | number | null;
+  errorMessage?: string | null;
+  updatedAt?: string;
+  statusHistory?: Array<{ status: string; at: string; errorCode?: string | number | null }>;
+};
+
 export type TwilioHealth = {
   ok: boolean;
   accountHint: string | null;
@@ -84,12 +95,46 @@ export type ListMessagesResult = {
   nextPageToken: string | null;
 };
 
+export class TwilioApiError extends Error {
+  status: number;
+  code?: string | number;
+
+  constructor(message: string, status: number, code?: string | number) {
+    super(message);
+    this.name = 'TwilioApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function isTwilioSuspendedStatus(status: number): boolean {
+  return status === 401 || status === 403 || status === 404;
+}
+
+export function isTwilioAccountUnavailableError(err: unknown): boolean {
+  return err instanceof TwilioApiError && isTwilioSuspendedStatus(err.status);
+}
+
+export function isTwilioStatusTerminal(status: string | undefined): boolean {
+  const s = String(status || '').toLowerCase();
+  return s === 'delivered' || s === 'read' || s === 'failed' || s === 'undelivered' || s === 'canceled';
+}
+
+async function parseTwilioError(r: Response, fallback: string): Promise<never> {
+  const data = (await r.json().catch(() => ({}))) as {
+    message?: string;
+    code?: string | number;
+  };
+  const message = typeof data.message === 'string' ? data.message : fallback;
+  throw new TwilioApiError(message, r.status, data.code);
+}
+
 export async function fetchTwilioHealth(): Promise<TwilioHealth> {
   const r = await fetch(twilioUrl('/health'), { headers: await authHeaders() });
-  const data = (await r.json().catch(() => ({}))) as TwilioHealth & { message?: string };
   if (!r.ok) {
-    throw new Error(typeof data.message === 'string' ? data.message : 'Twilio health check failed');
+    await parseTwilioError(r, 'Twilio health check failed');
   }
+  const data = (await r.json().catch(() => ({}))) as TwilioHealth;
   return { ok: data.ok, accountHint: data.accountHint ?? null, source: data.source };
 }
 
@@ -106,10 +151,10 @@ export async function listTwilioMessages(options: {
   const path = qs ? `/messages?${qs}` : '/messages';
 
   const r = await fetch(twilioUrl(path), { headers: await authHeaders() });
-  const data = (await r.json().catch(() => ({}))) as ListMessagesResult & { message?: string };
   if (!r.ok) {
-    throw new Error(typeof data.message === 'string' ? data.message : 'Failed to list messages');
+    await parseTwilioError(r, 'Failed to list messages');
   }
+  const data = (await r.json().catch(() => ({}))) as ListMessagesResult;
   return {
     messages: Array.isArray(data.messages) ? data.messages : [],
     nextPageToken: data.nextPageToken ?? null,
@@ -120,11 +165,39 @@ export async function getTwilioMessage(sid: string): Promise<TwilioMessage> {
   const r = await fetch(twilioUrl(`/messages/${encodeURIComponent(sid)}`), {
     headers: await authHeaders(),
   });
-  const data = (await r.json().catch(() => ({}))) as TwilioMessage & { message?: string };
   if (!r.ok) {
-    throw new Error(typeof data.message === 'string' ? data.message : 'Failed to load message');
+    await parseTwilioError(r, 'Failed to load message');
   }
-  return data;
+  return (await r.json().catch(() => ({}))) as TwilioMessage;
+}
+
+export async function getTwilioMessageStatus(sid: string): Promise<TwilioMessageStatusDoc | null> {
+  const r = await fetch(twilioUrl(`/messages/${encodeURIComponent(sid)}/status`), {
+    headers: await authHeaders(),
+  });
+  if (r.status === 404) return null;
+  if (!r.ok) {
+    await parseTwilioError(r, 'Failed to load message status');
+  }
+  return (await r.json().catch(() => null)) as TwilioMessageStatusDoc | null;
+}
+
+export async function fetchTwilioStatuses(
+  sids: string[]
+): Promise<Record<string, TwilioMessageStatusDoc>> {
+  const unique = [...new Set(sids.filter(Boolean))].slice(0, 50);
+  if (!unique.length) return {};
+  const q = new URLSearchParams({ sids: unique.join(',') });
+  const r = await fetch(twilioUrl(`/statuses?${q.toString()}`), {
+    headers: await authHeaders(),
+  });
+  if (!r.ok) {
+    await parseTwilioError(r, 'Failed to load message statuses');
+  }
+  const data = (await r.json().catch(() => ({}))) as {
+    statuses?: Record<string, TwilioMessageStatusDoc>;
+  };
+  return data.statuses && typeof data.statuses === 'object' ? data.statuses : {};
 }
 
 export async function sendTwilioMessage(payload: {
@@ -144,15 +217,14 @@ export async function sendTwilioMessage(payload: {
       // from / messagingServiceSid are ignored server-side (server secrets only)
     }),
   });
-  const data = (await r.json().catch(() => ({}))) as TwilioMessage & { message?: string };
   if (!r.ok) {
-    const message = typeof (data as { message?: string }).message === 'string'
-      ? (data as { message: string }).message
-      : 'Send failed';
-    const code = (data as { code?: string | number }).code
-      ? ` (code: ${(data as { code: string | number }).code})`
-      : '';
-    throw new Error(`${message}${code}`);
+    const data = (await r.json().catch(() => ({}))) as {
+      message?: string;
+      code?: string | number;
+    };
+    const message = typeof data.message === 'string' ? data.message : 'Send failed';
+    const code = data.code ? ` (code: ${data.code})` : '';
+    throw new TwilioApiError(`${message}${code}`, r.status, data.code);
   }
-  return data;
+  return (await r.json().catch(() => ({}))) as TwilioMessage;
 }

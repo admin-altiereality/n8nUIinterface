@@ -200,3 +200,45 @@ export async function listExecutions(
     return null;
   }
 }
+
+/** Sales-scoped execution list (salesperson-allowed Cloud Function route). */
+export async function listSalesExecutions(
+  limit = 10,
+  workflowId?: string | null
+): Promise<N8nExecutionListItem[] | null> {
+  const proxyBase = getProxyBase();
+  if (proxyBase === null && !import.meta.env.PROD) {
+    return null;
+  }
+  const base = proxyBase === null ? '' : proxyBase;
+  const workflowParam = workflowId ? `&workflowId=${encodeURIComponent(workflowId)}` : '';
+  const proxyUrl = `${base}/api/n8n/sales-executions?limit=${encodeURIComponent(limit)}${workflowParam}`;
+
+  try {
+    const res = await fetch(proxyUrl, { headers: await authHeaders() });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { data?: N8nExecutionListItem[] } | N8nExecutionListItem[];
+    if (Array.isArray(json)) return json;
+    if (json && Array.isArray(json.data)) return json.data;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getSalesExecutionStatus(executionId: string): Promise<N8nExecution | null> {
+  const proxyBase = getProxyBase();
+  if (proxyBase === null && !import.meta.env.PROD) {
+    return null;
+  }
+  const base = proxyBase === null ? '' : proxyBase;
+  const proxyUrl = `${base}/api/n8n/sales-executions/${encodeURIComponent(executionId)}`;
+
+  try {
+    const res = await fetch(proxyUrl, { headers: await authHeaders() });
+    if (!res.ok) return null;
+    return (await res.json()) as N8nExecution;
+  } catch {
+    return null;
+  }
+}

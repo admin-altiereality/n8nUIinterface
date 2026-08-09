@@ -173,12 +173,30 @@ function dataTokenUrl(): string {
   return '/api/auth/data-token';
 }
 
+const DATA_AUTH_BRIDGE_MAX_ATTEMPTS = 3;
+const DATA_AUTH_BRIDGE_BASE_DELAY_MS = 400;
+
+/** Once the bridge fails hard (401/403/404), skip further attempts until the next login. */
+let dataAuthBridgeSkipped = false;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isNonRetryableBridgeStatus(status: number): boolean {
+  return status === 401 || status === 403 || status === 404;
+}
+
 /**
  * Ensure the data Firebase app has Auth so Firestore/Storage rules see request.auth.
  * Exchanges the Auth-project ID token for a lexrn1 custom token (same uid).
+ *
+ * Fails soft: on 401/404 (or exhausted retries) logs a warning and returns without throwing,
+ * so login and auth-project access still work.
  */
 export async function ensureDataAuthSession(authUser: FirebaseUser): Promise<void> {
   if (!isFirebaseConfigured()) return;
+  if (dataAuthBridgeSkipped) return;
 
   const dataAuth = getDataAuth();
   if (dataAuth.currentUser?.uid === authUser.uid) return;
@@ -189,16 +207,56 @@ export async function ensureDataAuthSession(authUser: FirebaseUser): Promise<voi
   }
 
   dataAuthBridgePromise = (async () => {
-    const idToken = await authUser.getIdToken();
-    const res = await fetch(dataTokenUrl(), {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${idToken}` },
-    });
-    const body = (await res.json().catch(() => ({}))) as { customToken?: string; message?: string };
-    if (!res.ok || !body.customToken) {
-      throw new Error(body.message || 'Failed to establish data Firebase session.');
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= DATA_AUTH_BRIDGE_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        const idToken = await authUser.getIdToken(attempt > 1);
+        const res = await fetch(dataTokenUrl(), {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        const body = (await res.json().catch(() => ({}))) as { customToken?: string; message?: string };
+
+        if (res.ok && body.customToken) {
+          await signInWithCustomToken(dataAuth, body.customToken);
+          return;
+        }
+
+        const message = body.message || `Data auth bridge failed (HTTP ${res.status}).`;
+        lastError = new Error(message);
+
+        if (isNonRetryableBridgeStatus(res.status)) {
+          dataAuthBridgeSkipped = true;
+          console.warn(
+            `[auth-bridge] Skipping data Firebase session (HTTP ${res.status}). Continuing with auth-project session only.`,
+            message,
+          );
+          return;
+        }
+
+        if (attempt < DATA_AUTH_BRIDGE_MAX_ATTEMPTS) {
+          const delay = DATA_AUTH_BRIDGE_BASE_DELAY_MS * 2 ** (attempt - 1);
+          console.warn(`[auth-bridge] Attempt ${attempt} failed (HTTP ${res.status}); retrying in ${delay}ms…`);
+          await sleep(delay);
+          continue;
+        }
+      } catch (err) {
+        lastError = err;
+        if (attempt < DATA_AUTH_BRIDGE_MAX_ATTEMPTS) {
+          const delay = DATA_AUTH_BRIDGE_BASE_DELAY_MS * 2 ** (attempt - 1);
+          console.warn(`[auth-bridge] Attempt ${attempt} threw; retrying in ${delay}ms…`, err);
+          await sleep(delay);
+          continue;
+        }
+      }
     }
-    await signInWithCustomToken(dataAuth, body.customToken);
+
+    dataAuthBridgeSkipped = true;
+    console.warn(
+      '[auth-bridge] Could not establish data Firebase session after retries. Firestore/Storage may deny until the bridge is fixed.',
+      lastError,
+    );
   })();
 
   try {
@@ -206,6 +264,12 @@ export async function ensureDataAuthSession(authUser: FirebaseUser): Promise<voi
   } finally {
     dataAuthBridgePromise = null;
   }
+}
+
+/** Reset bridge skip flag (call on logout / new login). */
+export function resetDataAuthBridge(): void {
+  dataAuthBridgeSkipped = false;
+  dataAuthBridgePromise = null;
 }
 
 export async function signOutDataAuth(): Promise<void> {
@@ -238,8 +302,8 @@ export function getCurrentAuthUser(): FirebaseUser | null {
 
 /** Prefer data-app Auth when present (matches Firestore/Storage request.auth). */
 export function getCurrentDataUser(): FirebaseUser | null {
-  if (!isFirebaseConfigured()) return getCurrentAuthUser();
-  return getDataAuth().currentUser || getCurrentAuthUser();
+  if (!isFirebaseConfigured()) return null;
+  return getDataAuth().currentUser;
 }
 
 export async function uploadTwilioMediaToStorage(file: File, opts?: { pathPrefix?: string }): Promise<{
@@ -251,16 +315,21 @@ export async function uploadTwilioMediaToStorage(file: File, opts?: { pathPrefix
   }
 
   const authUser = getCurrentAuthUser();
-  if (authUser) {
-    await ensureDataAuthSession(authUser);
+  if (!authUser) {
+    throw new Error('Please sign in again before uploading media.');
   }
 
+  await ensureDataAuthSession(authUser);
   const dataUser = getCurrentDataUser();
+  if (!dataUser) {
+    throw new Error('Media upload is not authorized yet. Please refresh, sign in again, and retry.');
+  }
+
   const app = getOrCreateDataApp();
   const storage = getStorage(app);
 
   const prefix = opts?.pathPrefix || 'twilio-media';
-  const uid = dataUser?.uid || authUser?.uid || 'anon';
+  const uid = dataUser.uid;
   const safeName = String(file.name || 'upload').replace(/[^\w.-]+/g, '_');
   const storagePath = `${prefix}/${uid}/${Date.now()}-${safeName}`;
 

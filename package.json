@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "upload:server": "node src/index.js",
-    "build": "vite build",
+    "build": "node scripts/check-browser-env.cjs && vite build",
+    "build:fallback": "node scripts/check-browser-env.cjs && node scripts/esbuild-build.cjs",
     "preview": "vite preview",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "twilio:messages": "twilio api:core:messages:list --properties sid,status,direction,from,to,dateSent,body",

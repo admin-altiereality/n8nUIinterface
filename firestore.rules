@@ -822,6 +822,17 @@ service cloud.firestore {
       allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
       allow delete: if isAdminOrSuperadmin();
     }
+
+    // Twilio delivery/read status (written by Cloud Functions; readable by messaging roles)
+    match /twilioMessageStatus/{sid} {
+      allow read: if isAuthenticated() && (
+        getUserRole() == 'superadmin' ||
+        getUserRole() == 'associate' ||
+        getUserRole() == 'whatsapp_manager' ||
+        getUserRole() == 'admin'
+      );
+      allow write: if false;
+    }
     
     // Production logs - for debugging and monitoring
     match /production_logs/{logId} {

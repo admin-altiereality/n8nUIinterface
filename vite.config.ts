@@ -1,10 +1,11 @@
 import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react-swc';
 
+// Use esbuild JSX transform (avoid @vitejs/plugin-react-swc hang on this host).
 export default defineConfig({
-  plugins: [react()],
+  esbuild: {
+    jsx: 'automatic',
+  },
   server: {
-    port: 5173
-  }
+    port: 5173,
+  },
 });
-

@@ -10,6 +10,7 @@ import {
   isAuthConfigured,
   isFirebaseConfigured,
   ensureDataAuthSession,
+  resetDataAuthBridge,
   signOutDataAuth,
   type FirebaseUser,
 } from '../lib/firebase';
@@ -39,10 +40,15 @@ async function buildAppUser(fbUser: FirebaseUser): Promise<User> {
 
 async function bridgeDataAuth(fbUser: FirebaseUser): Promise<void> {
   if (!isFirebaseConfigured()) return;
+  if (import.meta.env.VITE_ENABLE_DATA_AUTH_BRIDGE !== 'true') return;
   try {
     await ensureDataAuthSession(fbUser);
   } catch (e) {
-    console.warn('Data Firebase auth bridge failed (Firestore/Storage may deny until fixed):', e);
+    // ensureDataAuthSession already fails soft; keep login unblocked if anything still throws.
+    console.warn(
+      'Data Firebase session could not be established. You are still signed in; some data features may be limited until the auth bridge is fixed.',
+      e,
+    );
   }
 }
 
@@ -79,6 +85,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
     try {
       const auth = getAuthInstance();
+      resetDataAuthBridge();
       const credential = await signInWithEmailAndPassword(auth, email, password);
       await bridgeDataAuth(credential.user);
       const appUser = await buildAppUser(credential.user);
@@ -105,6 +112,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const logout = () => {
     const auth = getAuthInstance();
+    resetDataAuthBridge();
     void signOutDataAuth();
     signOut(auth);
     setUser(null);

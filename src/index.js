@@ -198,8 +198,8 @@ app.post('/twilio/messages', async (req, res) => {
 
 const FOLDER_ID = '1OoNyMiea8Y-duXDisTat-TlC5e8WtWYe';
 
-const N8N_API_URL = process.env.VITE_N8N_API_URL;
-const N8N_API_KEY = process.env.VITE_N8N_API_KEY;
+const N8N_API_URL = process.env.N8N_API_URL;
+const N8N_API_KEY = process.env.N8N_API_KEY;
 
 // Load service account
 const auth = new google.auth.GoogleAuth({
