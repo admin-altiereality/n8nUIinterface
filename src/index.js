@@ -19,6 +19,7 @@ const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_MESSAGING_SERVICE_SID = process.env.TWILIO_MESSAGING_SERVICE_SID;
 const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM;
+const DEFAULT_WHATSAPP_DOCUMENT_TEMPLATE_SID = 'HX9fab5aaad062c64423df7a312c84e6af';
 
 function twilioBasicAuthHeader() {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) return null;
@@ -30,6 +31,63 @@ function twilioPageTokenFromNextUri(nextUri) {
   if (!nextUri || typeof nextUri !== 'string') return null;
   const q = nextUri.includes('?') ? nextUri.split('?')[1] : '';
   return new URLSearchParams(q).get('PageToken');
+}
+
+function isAllowedMediaUrl(mediaUrl) {
+  try {
+    const u = new URL(mediaUrl);
+    if (u.protocol !== 'https:') return false;
+    const host = u.hostname.toLowerCase();
+    return (
+      host === 'firebasestorage.googleapis.com' ||
+      host.endsWith('.firebasestorage.app') ||
+      host === 'storage.googleapis.com'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeMediaFilename(filename) {
+  const raw = String(filename || 'document').trim() || 'document';
+  return (
+    raw
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .replace(/[\\/:*?"<>|#?&]+/g, '-')
+      .replace(/\s+/g, ' ')
+      .slice(0, 120)
+      .trim() || 'document'
+  );
+}
+
+function contentDispositionFilename(filename) {
+  const fallback = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+  return `inline; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+function isValidTwilioContentSid(sid) {
+  return /^HX[a-f0-9]{32}$/i.test(String(sid || '').trim());
+}
+
+function readTemplateVariables(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out = {};
+  for (const [key, val] of Object.entries(value)) {
+    if (!/^[1-9]\d{0,2}$/.test(key)) continue;
+    if (typeof val !== 'string') continue;
+    out[key] = val.slice(0, 1500);
+  }
+  return out;
+}
+
+function getPublicBase(req) {
+  const proto = String(req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
+  const host = String(req.get('x-forwarded-host') || req.get('host') || 'localhost:3001').split(',')[0].trim();
+  return `${proto}://${host}`;
+}
+
+function getPublicMediaUrl(req, mediaUrl, filename) {
+  return `${getPublicBase(req).replace(/\/$/, '')}/twilio/media/${encodeURIComponent(filename)}?url=${encodeURIComponent(mediaUrl)}`;
 }
 
 // Twilio Programmable Messaging (Account SID + Auth Token in .env only — never in the browser).
@@ -121,6 +179,31 @@ app.get('/twilio/messages/:sid', async (req, res) => {
   }
 });
 
+app.get('/twilio/media/:filename', async (req, res) => {
+  const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+  const filename = sanitizeMediaFilename(req.params.filename);
+  if (!rawUrl || !isAllowedMediaUrl(rawUrl)) {
+    return res.status(400).send('Invalid media URL');
+  }
+
+  try {
+    const upstream = await fetch(rawUrl);
+    if (!upstream.ok) {
+      return res.status(upstream.status).send('Media unavailable');
+    }
+    const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
+    const body = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', String(body.length));
+    res.setHeader('Content-Disposition', contentDispositionFilename(filename));
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return res.status(200).send(body);
+  } catch (err) {
+    console.error('Twilio media proxy error:', err);
+    return res.status(502).send('Failed to fetch media');
+  }
+});
+
 app.post('/twilio/messages', async (req, res) => {
   const auth = twilioBasicAuthHeader();
   if (!auth) {
@@ -130,6 +213,13 @@ app.post('/twilio/messages', async (req, res) => {
   const to = typeof req.body?.to === 'string' ? req.body.to.trim() : '';
   const bodyText = typeof req.body?.body === 'string' ? req.body.body : '';
   const mediaUrl = typeof req.body?.mediaUrl === 'string' ? req.body.mediaUrl.trim() : '';
+  const mediaFilename = sanitizeMediaFilename(
+    typeof req.body?.mediaFilename === 'string' ? req.body.mediaFilename : undefined
+  );
+  const requestedTemplateSid =
+    typeof req.body?.templateSid === 'string' && req.body.templateSid.trim()
+      ? req.body.templateSid.trim()
+      : '';
   const from =
     typeof req.body?.from === 'string' && req.body.from.trim()
       ? req.body.from.trim()
@@ -141,6 +231,7 @@ app.post('/twilio/messages', async (req, res) => {
 
   const hasBody = Boolean(String(bodyText || '').trim());
   const hasMedia = Boolean(mediaUrl);
+  const templateSid = requestedTemplateSid || (hasMedia ? DEFAULT_WHATSAPP_DOCUMENT_TEMPLATE_SID : '');
 
   if (!to || (!hasBody && !hasMedia)) {
     return res.status(400).json({
@@ -153,14 +244,33 @@ app.post('/twilio/messages', async (req, res) => {
         'Provide `from` or `messagingServiceSid` in the request body, or set TWILIO_MESSAGING_SERVICE_SID / TWILIO_WHATSAPP_FROM in server .env.',
     });
   }
+  if (hasMedia && !isAllowedMediaUrl(mediaUrl)) {
+    return res.status(400).json({
+      message: 'mediaUrl must be an https URL on Firebase Storage / Google Cloud Storage.',
+    });
+  }
+  if (templateSid && !isValidTwilioContentSid(templateSid)) {
+    return res.status(400).json({ message: 'Invalid Twilio template/content SID.' });
+  }
 
   const params = new URLSearchParams();
+  const publicMediaUrl = hasMedia ? getPublicMediaUrl(req, mediaUrl, mediaFilename) : '';
+  const templateVariables = readTemplateVariables(req.body?.templateVariables);
+  if (hasMedia && !templateVariables['1']) templateVariables['1'] = publicMediaUrl;
+  if (hasMedia && !templateVariables['2']) templateVariables['2'] = mediaFilename;
+  if (hasBody && !templateVariables['3']) templateVariables['3'] = bodyText.trim();
+
   params.set('To', to);
-  if (hasBody) params.set('Body', bodyText);
+  if (templateSid) {
+    params.set('ContentSid', templateSid);
+    if (Object.keys(templateVariables).length) {
+      params.set('ContentVariables', JSON.stringify(templateVariables));
+    }
+  } else if (hasBody) params.set('Body', bodyText);
   else if (hasMedia) params.set('Body', ' ');
   if (messagingServiceSid) params.set('MessagingServiceSid', messagingServiceSid);
   else params.set('From', from);
-  if (hasMedia) params.set('MediaUrl', mediaUrl);
+  if (hasMedia && !templateSid) params.set('MediaUrl', publicMediaUrl);
 
   const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(
     TWILIO_ACCOUNT_SID

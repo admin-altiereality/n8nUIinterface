@@ -4,6 +4,7 @@ import {
   Loader2,
   MessageCircleMore,
   Paperclip,
+  FileText,
   RefreshCw,
   Search,
   Send,
@@ -42,6 +43,7 @@ type Thread = {
 type QueueFilter = 'all' | 'needsFollowUp' | 'highRisk' | 'failed' | 'seen';
 
 const STATUS_POLL_MS = 10000;
+const DOCUMENT_TEMPLATE_SID = 'HX9fab5aaad062c64423df7a312c84e6af';
 
 type TwilioServiceState = 'unknown' | 'ok' | 'suspended';
 
@@ -169,6 +171,24 @@ function waitingLabel(waitingMinutes: number): string {
   const h = Math.floor(waitingMinutes / 60);
   const m = waitingMinutes % 60;
   return `${h}h ${m}m`;
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function attachmentKind(file: File): string {
+  if (file.type.startsWith('image/')) return 'Image';
+  if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) return 'PDF document';
+  return file.type || 'Document';
 }
 
 export default function TwilioMessagingPage() {
@@ -368,15 +388,23 @@ export default function TwilioMessagingPage() {
     try {
       setAutoScroll(true);
       let mediaUrl: string | undefined;
+      let mediaFilename: string | undefined;
       if (attachmentFile) {
         setSendInfo(`Uploading ${attachmentFile.name}…`);
         if (!firebaseEnabled) throw new Error('Firebase is not configured for media uploads.');
         const uploaded = await uploadTwilioMediaToStorage(attachmentFile, { pathPrefix: 'twilio-media' });
         mediaUrl = uploaded.downloadUrl;
+        mediaFilename = attachmentFile.name;
         setSendInfo('Media uploaded. Sending to WhatsApp…');
       }
       const bodyToSend = attachmentFile ? '' : text;
-      const sent = await sendTwilioMessage({ to, body: bodyToSend, mediaUrl });
+      const sent = await sendTwilioMessage({
+        to,
+        body: bodyToSend,
+        mediaUrl,
+        mediaFilename,
+        templateSid: attachmentFile ? DOCUMENT_TEMPLATE_SID : undefined,
+      });
       setComposerText('');
       if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
       setAttachmentPreviewUrl(null); setAttachmentFile(null);
@@ -660,6 +688,24 @@ export default function TwilioMessagingPage() {
                 <Paperclip className="w-5 h-5" />
               </button>
               <div className="flex-1 relative">
+                {attachmentFile && (
+                  <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-zinc-700/60 bg-zinc-900/80 p-2.5">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      {attachmentPreviewUrl && attachmentFile.type.startsWith('image/') ? (
+                        <img src={attachmentPreviewUrl} alt="" className="h-10 w-10 rounded-md object-cover border border-zinc-700/60 flex-shrink-0" />
+                      ) : (
+                        <div className="h-10 w-10 rounded-md bg-zinc-800 border border-zinc-700/60 flex items-center justify-center flex-shrink-0">
+                          <FileText className="h-5 w-5 text-emerald-400" />
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium text-zinc-200 truncate">{attachmentFile.name}</p>
+                        <p className="text-[10px] text-zinc-500 truncate">{attachmentKind(attachmentFile)} · {formatFileSize(attachmentFile.size)}</p>
+                      </div>
+                    </div>
+                    <button onClick={removeAttachment} className="text-zinc-500 hover:text-zinc-300 p-1 flex-shrink-0" title="Remove attachment"><X className="w-4 h-4" /></button>
+                  </div>
+                )}
                 <textarea
                   value={composerText}
                   onChange={(e) => setComposerText(e.target.value)}
@@ -675,19 +721,6 @@ export default function TwilioMessagingPage() {
               </button>
             </div>
           </div>
-
-          {/* Attachment Preview */}
-          {attachmentFile && (
-            <div className="px-4 pb-3 bg-[var(--bg-surface)]">
-              <div className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-800/50 border border-zinc-700/50">
-                <div className="flex items-center gap-2 min-w-0">
-                  <Paperclip className="w-4 h-4 text-zinc-400 flex-shrink-0" />
-                  <span className="text-xs text-zinc-300 truncate">{attachmentFile.name}</span>
-                </div>
-                <button onClick={removeAttachment} className="text-zinc-500 hover:text-zinc-300 p-1"><X className="w-4 h-4" /></button>
-              </div>
-            </div>
-          )}
 
           {/* Send Info */}
           {sendInfo && (

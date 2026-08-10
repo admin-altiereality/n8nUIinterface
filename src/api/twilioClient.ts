@@ -206,6 +206,9 @@ export async function sendTwilioMessage(payload: {
   from?: string;
   messagingServiceSid?: string;
   mediaUrl?: string;
+  mediaFilename?: string;
+  templateSid?: string;
+  templateVariables?: Record<string, string>;
 }): Promise<TwilioMessage> {
   const r = await fetch(twilioUrl('/messages'), {
     method: 'POST',
@@ -214,6 +217,9 @@ export async function sendTwilioMessage(payload: {
       to: payload.to,
       body: payload.body,
       mediaUrl: payload.mediaUrl,
+      mediaFilename: payload.mediaFilename,
+      templateSid: payload.templateSid,
+      templateVariables: payload.templateVariables,
       // from / messagingServiceSid are ignored server-side (server secrets only)
     }),
   });
