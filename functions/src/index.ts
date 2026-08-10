@@ -49,6 +49,7 @@ const N8N_ROLES = new Set(["superadmin", "associate", "builder"]);
 /** Sales Funnel execution polling + Sheets leads (scoped away from full builder n8n access). */
 const SALES_N8N_ROLES = new Set(["superadmin", "associate", "salesperson"]);
 const SHEETS_ROLES = new Set(["superadmin", "associate", "salesperson"]);
+const OPS_ROLES = new Set(["superadmin", "associate", "salesperson", "whatsapp_manager"]);
 
 const SALES_FUNNEL_WORKFLOW_ID =
   process.env.N8N_SALES_WORKFLOW_ID || "sLk0CAalsSlR5z4P";
@@ -57,7 +58,14 @@ const SHEETS_LEADS_WEBHOOK_URL =
   "https://n8n.altiereality.com/webhook/sheet-leads-read";
 
 const TWILIO_STATUS_COLLECTION = "twilioMessageStatus";
+const TWILIO_OUTBOUND_LOGS_COLLECTION = "twilioOutboundLogs";
+const TWILIO_INBOUND_COLLECTION = "twilioInboundMessages";
+const LEAD_ASSIGNMENTS_COLLECTION = "leadAssignments";
+const OPS_AUDIT_COLLECTION = "opsAuditLog";
 const DEFAULT_WHATSAPP_DOCUMENT_TEMPLATE_SID = "HX9fab5aaad062c64423df7a312c84e6af";
+const DEFAULT_DOCUMENT_TEMPLATE_NAME = "LearnXR document";
+const MEDIA_SIZE_LIMIT_BYTES = 16 * 1024 * 1024;
+const SUPPORTED_MEDIA_CONTENT_TYPE = /^(image\/|video\/|audio\/|application\/pdf$)/i;
 const TWILIO_STATUS_RANK: Record<string, number> = {
   queued: 0,
   accepted: 1,
@@ -318,6 +326,35 @@ function readTemplateVariables(value: unknown): Record<string, string> {
   return out;
 }
 
+async function preflightMediaUrl(publicMediaUrl: string): Promise<{
+  ok: true;
+  contentType: string;
+  contentLength: number;
+} | {
+  ok: false;
+  status: number;
+  message: string;
+}> {
+  try {
+    const upstream = await fetch(publicMediaUrl);
+    if (!upstream.ok) {
+      return { ok: false, status: upstream.status, message: "Media proxy URL is not reachable." };
+    }
+    const contentType = upstream.headers.get("content-type") || "application/octet-stream";
+    const body = Buffer.from(await upstream.arrayBuffer());
+    if (!SUPPORTED_MEDIA_CONTENT_TYPE.test(contentType)) {
+      return { ok: false, status: 415, message: `Unsupported media type: ${contentType}` };
+    }
+    if (body.length > MEDIA_SIZE_LIMIT_BYTES) {
+      return { ok: false, status: 413, message: "Media is too large for WhatsApp send." };
+    }
+    return { ok: true, contentType, contentLength: body.length };
+  } catch (err) {
+    logger.warn("media preflight failed", err);
+    return { ok: false, status: 502, message: "Media proxy preflight failed." };
+  }
+}
+
 function isValidWhatsAppRecipient(to: string): boolean {
   // whatsapp:+E164 or +E164
   return /^(whatsapp:)?\+[1-9]\d{7,14}$/i.test(to.trim());
@@ -325,6 +362,117 @@ function isValidWhatsAppRecipient(to: string): boolean {
 
 function isValidTwilioMessageSid(sid: string): boolean {
   return /^SM[a-f0-9]{32}$/i.test(sid) || /^MM[a-f0-9]{32}$/i.test(sid);
+}
+
+function getAuthedUser(req: express.Request): AuthedUser | undefined {
+  return (req as express.Request & { authedUser?: AuthedUser }).authedUser;
+}
+
+function safeText(value: unknown, fallback = ""): string {
+  return String(value ?? fallback).trim();
+}
+
+function normalizeWhatsAppAddress(value: unknown): string {
+  return safeText(value).replace(/^whatsapp:/i, "").trim();
+}
+
+function leadKeyFromPhone(value: unknown): string {
+  const normalized = normalizeWhatsAppAddress(value).replace(/[^\d+]/g, "");
+  if (!normalized) return "unknown";
+  return normalized.startsWith("+") ? normalized : `+${normalized}`;
+}
+
+function roleCanUseSheets(role: string): boolean {
+  return role === "superadmin" || role === "associate" || role === "salesperson";
+}
+
+function docDataWithId(doc: unknown): Record<string, unknown> {
+  const d = doc as { id: string; data: () => Record<string, unknown> | undefined };
+  return { id: d.id, ...(d.data() || {}) };
+}
+
+async function writeOpsAudit(input: {
+  action: string;
+  auth?: AuthedUser;
+  targetId?: string | null;
+  details?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    await getDataProjectDb().collection(OPS_AUDIT_COLLECTION).add({
+      action: input.action,
+      actorUid: input.auth?.uid || null,
+      actorEmail: input.auth?.email || null,
+      actorRole: input.auth?.role || null,
+      targetId: input.targetId || null,
+      details: input.details || {},
+      createdAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    logger.warn("ops audit write failed", err);
+  }
+}
+
+async function sendOpsAlert(input: {
+  type: string;
+  severity: "info" | "warning" | "critical";
+  message: string;
+  details?: Record<string, unknown>;
+}): Promise<void> {
+  const webhookUrl = process.env.OPS_ALERT_EMAIL_WEBHOOK_URL || "";
+  if (!webhookUrl) return;
+  try {
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...input,
+        source: "learnxr-agents-api",
+        createdAt: new Date().toISOString(),
+      }),
+    });
+    await writeOpsAudit({ action: "alert.sent", details: { type: input.type, severity: input.severity } });
+  } catch (err) {
+    logger.warn("ops alert webhook failed", err);
+  }
+}
+
+async function writeTwilioDiagnostic(input: {
+  phase: string;
+  status: "attempt" | "success" | "failed";
+  auth?: AuthedUser;
+  to?: string;
+  templateSid?: string;
+  mediaFilename?: string;
+  publicMediaUrl?: string;
+  twilioHttpStatus?: number | null;
+  twilioCode?: unknown;
+  twilioMessage?: unknown;
+  twilioMoreInfo?: unknown;
+  messageSid?: string | null;
+}): Promise<string | null> {
+  try {
+    const ref = await getDataProjectDb().collection(TWILIO_OUTBOUND_LOGS_COLLECTION).add({
+      phase: input.phase,
+      status: input.status,
+      actorUid: input.auth?.uid || null,
+      actorEmail: input.auth?.email || null,
+      actorRole: input.auth?.role || null,
+      to: input.to || null,
+      templateSid: input.templateSid || null,
+      mediaFilename: input.mediaFilename || null,
+      publicMediaUrl: input.publicMediaUrl || null,
+      twilioHttpStatus: input.twilioHttpStatus ?? null,
+      twilioCode: input.twilioCode ?? null,
+      twilioMessage: input.twilioMessage ?? null,
+      twilioMoreInfo: input.twilioMoreInfo ?? null,
+      messageSid: input.messageSid || null,
+      createdAt: new Date().toISOString(),
+    });
+    return ref.id;
+  } catch (err) {
+    logger.warn("twilio diagnostic write failed", err);
+    return null;
+  }
 }
 
 function getPublicApiBase(req: express.Request): string {
@@ -399,6 +547,130 @@ async function upsertTwilioMessageStatus(input: {
     },
     { merge: true }
   );
+}
+
+function filterLeadRows(rows: unknown[], query: Record<string, unknown>): Record<string, unknown>[] {
+  const q = safeText(query.q).toLowerCase();
+  const city = safeText(query.city).toLowerCase();
+  const status = safeText(query.status).toLowerCase();
+  const leadStatus = safeText(query.leadStatus).toLowerCase();
+  const whatsappStatus = safeText(query.whatsappStatus).toLowerCase();
+
+  return rows.filter((row): row is Record<string, unknown> => {
+    if (!row || typeof row !== "object") return false;
+    const r = row as Record<string, unknown>;
+    const get = (k: string) => String(r[k] ?? "").toLowerCase();
+    if (city && !get("City").includes(city)) return false;
+    if (status && get("Status") !== status) return false;
+    if (leadStatus && get("Lead_status") !== leadStatus) return false;
+    if (whatsappStatus && get("Whatsapp_status") !== whatsappStatus) return false;
+    if (q) {
+      const hay = [
+        get("School Name"),
+        get("Email ID"),
+        get("City"),
+        get("Phone number"),
+        get("Lead_status"),
+        get("Whatsapp_status"),
+      ].join(" ");
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+async function fetchSheetLeadRows(query: Record<string, unknown> = {}): Promise<{
+  fetchedAt: string;
+  rows: Record<string, unknown>[];
+}> {
+  const webhookUrl = SHEETS_LEADS_WEBHOOK_URL;
+  if (!webhookUrl) {
+    throw new Error("Sheets leads webhook is not configured.");
+  }
+  const url = new URL(webhookUrl);
+  for (const key of ["city", "status", "leadStatus", "whatsappStatus", "q", "limit"] as const) {
+    const val = query[key];
+    if (typeof val === "string" && val.trim()) url.searchParams.set(key, val.trim());
+  }
+
+  const upstream = await fetch(url.toString(), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  const text = await upstream.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`Unexpected sheets webhook response: ${text.slice(0, 120)}`);
+  }
+  if (!upstream.ok) {
+    const message =
+      data && typeof data === "object" && typeof (data as Record<string, unknown>).message === "string"
+        ? String((data as Record<string, unknown>).message)
+        : "Sheets leads fetch failed";
+    throw new Error(message);
+  }
+
+  let rows: unknown[] = [];
+  if (Array.isArray(data)) rows = data;
+  else if (data && typeof data === "object") {
+    const obj = data as Record<string, unknown>;
+    if (Array.isArray(obj.rows)) rows = obj.rows;
+    else if (Array.isArray(obj.data)) rows = obj.data;
+    else if (Array.isArray(obj.leads)) rows = obj.leads;
+  }
+  return { fetchedAt: new Date().toISOString(), rows: filterLeadRows(rows, query) };
+}
+
+function leadCity(row: Record<string, unknown>): string {
+  return safeText(row.City || row.city || "Unknown", "Unknown") || "Unknown";
+}
+
+function leadStatus(row: Record<string, unknown>): string {
+  return safeText(row.Lead_status || row.leadStatus || "Unknown", "Unknown") || "Unknown";
+}
+
+function whatsappStatus(row: Record<string, unknown>): string {
+  return safeText(row.Whatsapp_status || row.whatsappStatus || "unknown", "unknown").toLowerCase();
+}
+
+function parseMaybeDate(value: unknown): number {
+  const raw = safeText(value);
+  if (!raw) return 0;
+  const t = Date.parse(raw);
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function isOverdueFollowUp(row: Record<string, unknown>): boolean {
+  const t = parseMaybeDate(row.Next_Follow_up);
+  return Boolean(t && t <= Date.now());
+}
+
+function csvEscape(value: unknown): string {
+  const raw = String(value ?? "");
+  if (/[",\n\r]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
+  return raw;
+}
+
+function rowsToCsv(rows: Record<string, unknown>[]): string {
+  const headers = [
+    "School Name",
+    "Email ID",
+    "City",
+    "Status",
+    "Lead_status",
+    "Phone number",
+    "Whatsapp_status",
+    "Whatsapp_message_sid",
+    "Next_Follow_up",
+    "assignedTo",
+  ];
+  const lines = [headers.map(csvEscape).join(",")];
+  for (const row of rows) {
+    lines.push(headers.map((h) => csvEscape(row[h])).join(","));
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 const app = express();
@@ -622,95 +894,212 @@ app.options("/api/sheets/leads", cors({
 }));
 
 app.get("/api/sheets/leads", requireRoles(SHEETS_ROLES), async (req, res) => {
-  const webhookUrl = SHEETS_LEADS_WEBHOOK_URL;
-  if (!webhookUrl) {
-    return res.status(503).json({ message: "Sheets leads webhook is not configured." });
-  }
-
-  const url = new URL(webhookUrl);
-  for (const key of ["city", "status", "leadStatus", "whatsappStatus", "q", "limit"] as const) {
-    const val = req.query[key];
-    if (typeof val === "string" && val.trim()) url.searchParams.set(key, val.trim());
-  }
-
   try {
-    const upstream = await fetch(url.toString(), {
-      method: "GET",
-      headers: { Accept: "application/json" },
-    });
-    const text = await upstream.text();
-    let data: unknown;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      return res.status(502).json({
-        message: "Unexpected sheets webhook response",
-        raw: text.slice(0, 500),
-      });
-    }
-    if (!upstream.ok) {
-      return res.status(upstream.status).json(
-        typeof data === "object" && data
-          ? data
-          : { message: "Sheets leads fetch failed" }
-      );
-    }
-
-    // Normalize: webhook may return { rows }, { data }, or a bare array
-    let rows: unknown[] = [];
-    if (Array.isArray(data)) rows = data;
-    else if (data && typeof data === "object") {
-      const obj = data as Record<string, unknown>;
-      if (Array.isArray(obj.rows)) rows = obj.rows;
-      else if (Array.isArray(obj.data)) rows = obj.data;
-      else if (Array.isArray(obj.leads)) rows = obj.leads;
-    }
-
-    const q = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
-    const city = typeof req.query.city === "string" ? req.query.city.trim().toLowerCase() : "";
-    const status = typeof req.query.status === "string" ? req.query.status.trim().toLowerCase() : "";
-    const leadStatus =
-      typeof req.query.leadStatus === "string" ? req.query.leadStatus.trim().toLowerCase() : "";
-    const whatsappStatus =
-      typeof req.query.whatsappStatus === "string"
-        ? req.query.whatsappStatus.trim().toLowerCase()
-        : "";
-
-    const filtered = rows.filter((row) => {
-      if (!row || typeof row !== "object") return false;
-      const r = row as Record<string, unknown>;
-      const get = (k: string) => String(r[k] ?? "").toLowerCase();
-      if (city && !get("City").includes(city)) return false;
-      if (status && get("Status") !== status) return false;
-      if (leadStatus && get("Lead_status") !== leadStatus) return false;
-      if (whatsappStatus && get("Whatsapp_status") !== whatsappStatus) return false;
-      if (q) {
-        const hay = [
-          get("School Name"),
-          get("Email ID"),
-          get("City"),
-          get("Phone number"),
-          get("Lead_status"),
-          get("Whatsapp_status"),
-        ].join(" ");
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-
+    const result = await fetchSheetLeadRows(req.query as Record<string, unknown>);
     const limitRaw = Number.parseInt(String(req.query.limit || "500"), 10);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 500;
-
     return res.json({
       ok: true,
-      fetchedAt: new Date().toISOString(),
-      total: filtered.length,
-      rows: filtered.slice(0, limit),
+      fetchedAt: result.fetchedAt,
+      total: result.rows.length,
+      rows: result.rows.slice(0, limit),
     });
   } catch (err) {
     logger.error("sheets leads proxy failed", err);
-    return res.status(502).json({ message: "Failed to fetch leads from sheets webhook." });
+    return res.status(502).json({ message: err instanceof Error ? err.message : "Failed to fetch leads from sheets webhook." });
   }
+});
+
+app.options("/api/ops/dashboard", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+app.options("/api/ops/export.csv", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+app.options("/api/ops/leads/:id/timeline", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+app.options("/api/ops/assignments/:threadId", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+
+app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
+  const auth = getAuthedUser(req);
+  try {
+    const canReadLeadRows = auth ? roleCanUseSheets(auth.role) : false;
+    const leadsResult = canReadLeadRows
+      ? await fetchSheetLeadRows({ ...req.query, limit: "2000" } as Record<string, unknown>)
+      : { fetchedAt: new Date().toISOString(), rows: [] as Record<string, unknown>[] };
+    const db = getDataProjectDb();
+    const [statusSnap, outboundSnap, inboundSnap, assignmentSnap, auditSnap, runsSnap] = await Promise.all([
+      db.collection(TWILIO_STATUS_COLLECTION).limit(500).get(),
+      db.collection(TWILIO_OUTBOUND_LOGS_COLLECTION).orderBy("createdAt", "desc").limit(200).get(),
+      db.collection(TWILIO_INBOUND_COLLECTION).orderBy("createdAt", "desc").limit(200).get(),
+      db.collection(LEAD_ASSIGNMENTS_COLLECTION).limit(500).get(),
+      db.collection(OPS_AUDIT_COLLECTION).orderBy("createdAt", "desc").limit(50).get(),
+      db.collection("salesFunnelRuns").orderBy("createdAt", "desc").limit(100).get().catch(() => ({ docs: [] })),
+    ]);
+    const statuses = statusSnap.docs.map((d) => d.data() || {});
+    const outbound = outboundSnap.docs.map(docDataWithId);
+    const inbound = inboundSnap.docs.map(docDataWithId);
+    const assignments = assignmentSnap.docs.map(docDataWithId);
+    const today = new Date().toISOString().slice(0, 10);
+    const deliveredToday = statuses.filter((s) => {
+      const st = safeText(s.status).toLowerCase();
+      return (st === "delivered" || st === "read") && safeText(s.updatedAt).startsWith(today);
+    }).length;
+    const readToday = statuses.filter((s) => safeText(s.status).toLowerCase() === "read" && safeText(s.updatedAt).startsWith(today)).length;
+    const failedWhatsApp = statuses.filter((s) => ["failed", "undelivered", "canceled"].includes(safeText(s.status).toLowerCase())).length;
+    const leadsByStatus: Record<string, number> = {};
+    const campaignByCity: Record<string, Record<string, number>> = {};
+    for (const lead of leadsResult.rows) {
+      const status = leadStatus(lead);
+      leadsByStatus[status] = (leadsByStatus[status] || 0) + 1;
+      const city = leadCity(lead);
+      const bucket = campaignByCity[city] || {
+        scraped: 0,
+        emailed: 0,
+        whatsappSent: 0,
+        delivered: 0,
+        read: 0,
+        replied: 0,
+        failed: 0,
+      };
+      bucket.scraped += 1;
+      if (safeText(lead.Reply_Status) || safeText(lead.email_sent_at)) bucket.emailed += 1;
+      const wa = whatsappStatus(lead);
+      if (wa) bucket.whatsappSent += wa === "unknown" ? 0 : 1;
+      if (wa === "delivered") bucket.delivered += 1;
+      if (wa === "read") bucket.read += 1;
+      if (safeText(lead.whatsapp_replied).toLowerCase() === "true" || safeText(lead.whatsapp_reply_message)) bucket.replied += 1;
+      if (wa === "failed" || wa === "undelivered") bucket.failed += 1;
+      campaignByCity[city] = bucket;
+    }
+    const openFollowUps = leadsResult.rows.filter(isOverdueFollowUp).length;
+    const activeFunnelRuns = (runsSnap.docs || []).filter((d) => {
+      const data = d.data ? d.data() : {};
+      const st = safeText(data.status).toLowerCase();
+      return st === "running" || st === "waiting";
+    }).length;
+    return res.json({
+      ok: true,
+      fetchedAt: leadsResult.fetchedAt,
+      role: auth?.role || null,
+      kpis: {
+        activeFunnelRuns,
+        messagesDeliveredToday: deliveredToday,
+        messagesReadToday: readToday,
+        failedWhatsApp,
+        openFollowUps,
+        totalLeads: leadsResult.rows.length,
+        inboundToday: inbound.filter((m) => safeText(m.createdAt).startsWith(today)).length,
+      },
+      leadsByStatus,
+      campaignByCity,
+      followUps: leadsResult.rows.filter(isOverdueFollowUp).slice(0, 25),
+      failedMessages: outbound.filter((d) => safeText(d.status) === "failed").slice(0, 25),
+      assignments,
+      recentAudit: auditSnap.docs.map(docDataWithId),
+      canReadLeadRows,
+    });
+  } catch (err) {
+    logger.error("ops dashboard failed", err);
+    return res.status(502).json({ message: err instanceof Error ? err.message : "Failed to load ops dashboard." });
+  }
+});
+
+app.get("/api/ops/export.csv", requireRoles(OPS_ROLES), async (req, res) => {
+  const auth = getAuthedUser(req);
+  if (!auth || !roleCanUseSheets(auth.role)) {
+    return res.status(403).send("Forbidden: export requires sales lead access.");
+  }
+  try {
+    const result = await fetchSheetLeadRows({ ...req.query, limit: "5000" } as Record<string, unknown>);
+    const assignmentsSnap = await getDataProjectDb().collection(LEAD_ASSIGNMENTS_COLLECTION).limit(1000).get();
+    const assignments = new Map(assignmentsSnap.docs.map((doc) => [doc.id, doc.data() || {}]));
+    const rows = result.rows.map((row) => {
+      const key = leadKeyFromPhone(row["Phone number"] || row.to_number);
+      const assignment = assignments.get(key) || {};
+      return { ...row, assignedTo: assignment.assignedToEmail || assignment.assignedToName || "" };
+    });
+    await writeOpsAudit({ action: "ops.export.csv", auth, details: { rows: rows.length } });
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="learnxr-leads-export.csv"');
+    return res.status(200).send(rowsToCsv(rows));
+  } catch (err) {
+    logger.error("ops csv export failed", err);
+    return res.status(502).send("Failed to export leads.");
+  }
+});
+
+app.get("/api/ops/leads/:id/timeline", requireRoles(OPS_ROLES), async (req, res) => {
+  const leadId = decodeURIComponent(req.params.id || "");
+  try {
+    const db = getDataProjectDb();
+    const [statusSnap, inboundSnap, outboundSnap, assignmentSnap, auditSnap] = await Promise.all([
+      db.collection(TWILIO_STATUS_COLLECTION).limit(500).get(),
+      db.collection(TWILIO_INBOUND_COLLECTION).orderBy("createdAt", "desc").limit(200).get(),
+      db.collection(TWILIO_OUTBOUND_LOGS_COLLECTION).orderBy("createdAt", "desc").limit(200).get(),
+      db.collection(LEAD_ASSIGNMENTS_COLLECTION).doc(leadId).get(),
+      db.collection(OPS_AUDIT_COLLECTION).where("targetId", "==", leadId).limit(100).get().catch(() => ({ docs: [] })),
+    ]);
+    const leadRows = roleCanUseSheets(getAuthedUser(req)?.role || "")
+      ? (await fetchSheetLeadRows({ limit: "2000" })).rows
+      : [];
+    const lead = leadRows.find((row) => leadKeyFromPhone(row["Phone number"] || row.to_number) === leadId) || null;
+    const timeline = [
+      ...inboundSnap.docs.map(docDataWithId).filter((m) => leadKeyFromPhone(m.from || m.From) === leadId).map((m) => ({ type: "whatsapp_inbound", at: m.createdAt, data: m })),
+      ...outboundSnap.docs.map(docDataWithId).filter((m) => leadKeyFromPhone(m.to) === leadId).map((m) => ({ type: "whatsapp_outbound", at: m.createdAt, data: m })),
+      ...statusSnap.docs.map(docDataWithId).filter((m) => leadKeyFromPhone(m.to || m.from) === leadId).map((m) => ({ type: "delivery_status", at: m.updatedAt, data: m })),
+      ...(auditSnap.docs || []).map(docDataWithId).map((m) => ({ type: "audit", at: m.createdAt, data: m })),
+    ].sort((a, b) => parseMaybeDate(b.at) - parseMaybeDate(a.at));
+    return res.json({
+      ok: true,
+      leadId,
+      lead,
+      assignment: assignmentSnap.exists ? assignmentSnap.data() : null,
+      timeline,
+    });
+  } catch (err) {
+    logger.error("ops lead timeline failed", err);
+    return res.status(502).json({ message: "Failed to load lead timeline." });
+  }
+});
+
+app.get("/api/ops/assignments/:threadId", requireRoles(OPS_ROLES), async (req, res) => {
+  const threadId = leadKeyFromPhone(req.params.threadId);
+  const snap = await getDataProjectDb().collection(LEAD_ASSIGNMENTS_COLLECTION).doc(threadId).get();
+  return res.json({ assignment: snap.exists ? { id: snap.id, ...snap.data() } : null });
+});
+
+app.patch("/api/ops/assignments/:threadId", requireRoles(OPS_ROLES), async (req, res) => {
+  const auth = getAuthedUser(req);
+  const threadId = leadKeyFromPhone(req.params.threadId);
+  const action = safeText(req.body?.action || "claim");
+  const ref = getDataProjectDb().collection(LEAD_ASSIGNMENTS_COLLECTION).doc(threadId);
+  const snap = await ref.get();
+  const existing = snap.exists ? (snap.data() || {}) : null;
+  if (action === "unclaim") {
+    if (existing?.assignedTo && existing.assignedTo !== auth?.uid && auth?.role !== "superadmin" && auth?.role !== "associate") {
+      return res.status(409).json({ message: "Thread is assigned to another user.", assignment: existing });
+    }
+    await ref.set({ assignedTo: null, assignedToEmail: null, assignedToName: null, unassignedAt: new Date().toISOString() }, { merge: true });
+    await writeOpsAudit({ action: "assignment.unclaim", auth, targetId: threadId });
+    return res.json({ assignment: null });
+  }
+  if (existing?.assignedTo && existing.assignedTo !== auth?.uid) {
+    return res.status(409).json({ message: "Thread is already claimed.", assignment: existing });
+  }
+  const assignment = {
+    assignedTo: auth?.uid || null,
+    assignedToEmail: auth?.email || null,
+    assignedToName: auth?.email || auth?.uid || "Agent",
+    assignedAt: new Date().toISOString(),
+    threadId,
+  };
+  await ref.set(assignment, { merge: true });
+  await writeOpsAudit({ action: "assignment.claim", auth, targetId: threadId, details: assignment });
+  return res.json({ assignment });
 });
 
 app.options("/api/twilio/messages", cors({
@@ -728,6 +1117,15 @@ app.options("/api/twilio/statuses", cors({
 app.options("/api/twilio/status", cors({
   origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
 }));
+app.options("/api/twilio/templates", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+app.options("/api/twilio/send-diagnostics", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+app.options("/api/twilio/inbound", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
 
 app.get("/api/twilio/health", requireRoles(TWILIO_ROLES), (_req, res) => {
   const t = getTwilioConfig();
@@ -735,6 +1133,41 @@ app.get("/api/twilio/health", requireRoles(TWILIO_ROLES), (_req, res) => {
     ok: t.ok,
     source: "firebase-functions",
   });
+});
+
+app.get("/api/twilio/templates", requireRoles(TWILIO_ROLES), (_req, res) => {
+  return res.json({
+    templates: [
+      {
+        sid: DEFAULT_WHATSAPP_DOCUMENT_TEMPLATE_SID,
+        name: DEFAULT_DOCUMENT_TEMPLATE_NAME,
+        channel: "whatsapp",
+        mediaType: "document",
+        variables: {
+          "1": "mediaUrl",
+          "2": "filename",
+          "3": "caption",
+        },
+        isDefault: true,
+      },
+    ],
+  });
+});
+
+app.get("/api/twilio/send-diagnostics", requireRoles(TWILIO_ROLES), async (req, res) => {
+  const takeRaw = Number.parseInt(String(req.query.limit || "25"), 10);
+  const take = Number.isFinite(takeRaw) ? Math.min(Math.max(takeRaw, 1), 100) : 25;
+  try {
+    const snap = await getDataProjectDb()
+      .collection(TWILIO_OUTBOUND_LOGS_COLLECTION)
+      .orderBy("createdAt", "desc")
+      .limit(take)
+      .get();
+    return res.json({ diagnostics: snap.docs.map(docDataWithId) });
+  } catch (err) {
+    logger.error("Twilio diagnostics list failed", err);
+    return res.status(502).json({ message: "Failed to load send diagnostics." });
+  }
 });
 
 app.get("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) => {
@@ -941,6 +1374,70 @@ app.post("/api/twilio/status", async (req, res) => {
   }
 });
 
+app.post("/api/twilio/inbound", async (req, res) => {
+  const t = getTwilioConfig();
+  if (!t.ok) {
+    return res.status(503).send("Twilio not configured");
+  }
+
+  const body = (req.body || {}) as Record<string, unknown>;
+  const params: Record<string, string> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (v == null) continue;
+    params[k] = String(v);
+  }
+
+  const signature = req.get("x-twilio-signature") || undefined;
+  const callbackUrl = `${getPublicApiBase(req)}/api/twilio/inbound`;
+  if (!validateTwilioRequestSignature(t.authToken, signature, callbackUrl, params)) {
+    logger.warn("Twilio inbound signature mismatch", { callbackUrl });
+    return res.status(403).send("Invalid signature");
+  }
+
+  const sid = params.MessageSid || params.SmsSid || "";
+  if (!isValidTwilioMessageSid(sid)) {
+    return res.status(400).send("Invalid MessageSid");
+  }
+
+  try {
+    const threadId = leadKeyFromPhone(params.From);
+    const mediaCount = Number.parseInt(params.NumMedia || "0", 10) || 0;
+    const media: Array<Record<string, string>> = [];
+    for (let i = 0; i < mediaCount; i += 1) {
+      media.push({
+        url: params[`MediaUrl${i}`] || "",
+        contentType: params[`MediaContentType${i}`] || "",
+      });
+    }
+    const doc = {
+      sid,
+      threadId,
+      from: params.From || null,
+      to: params.To || null,
+      body: params.Body || "",
+      media,
+      status: params.MessageStatus || params.SmsStatus || "received",
+      createdAt: new Date().toISOString(),
+      rawKeys: Object.keys(params).sort(),
+    };
+    await getDataProjectDb().collection(TWILIO_INBOUND_COLLECTION).doc(sid).set(doc, { merge: true });
+    await upsertTwilioMessageStatus({
+      sid,
+      to: params.To,
+      from: params.From,
+      status: params.MessageStatus || params.SmsStatus || "received",
+      errorCode: params.ErrorCode || null,
+      errorMessage: params.ErrorMessage || null,
+    });
+    await writeOpsAudit({ action: "twilio.inbound.persisted", targetId: threadId, details: { sid } });
+    res.setHeader("Content-Type", "text/xml");
+    return res.status(200).send("<Response></Response>");
+  } catch (err) {
+    logger.error("Twilio inbound write failed", err);
+    return res.status(500).send("Failed to persist inbound message");
+  }
+});
+
 app.get("/api/twilio/media/:filename", async (req, res) => {
   const rawUrl = typeof req.query.url === "string" ? req.query.url.trim() : "";
   const filename = sanitizeMediaFilename(req.params.filename);
@@ -967,6 +1464,7 @@ app.get("/api/twilio/media/:filename", async (req, res) => {
 });
 
 app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) => {
+  const authUser = getAuthedUser(req);
   const t = getTwilioConfig();
   if (!t.ok) {
     return res.status(503).json({ message: "Twilio is not configured on this function." });
@@ -995,30 +1493,90 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
   const hasBody = Boolean(String(bodyText || "").trim());
   const hasMedia = Boolean(mediaUrl);
   const templateSid = requestedTemplateSid || (hasMedia ? DEFAULT_WHATSAPP_DOCUMENT_TEMPLATE_SID : "");
+  let diagnosticId: string | null = null;
 
   if (!to || (!hasBody && !hasMedia)) {
+    diagnosticId = await writeTwilioDiagnostic({
+      phase: "validation",
+      status: "failed",
+      auth: authUser,
+      to,
+      templateSid,
+      mediaFilename,
+      twilioMessage: "Missing required fields",
+    });
     return res.status(400).json({
       message: `Missing required fields (Twilio send): toPresent=${Boolean(to)} hasBody=${hasBody} hasMedia=${hasMedia}`,
+      phase: "validation",
+      diagnosticId,
     });
   }
   if (!isValidWhatsAppRecipient(to)) {
-    return res.status(400).json({ message: "Invalid recipient. Use whatsapp:+E164 or +E164." });
+    diagnosticId = await writeTwilioDiagnostic({
+      phase: "validation",
+      status: "failed",
+      auth: authUser,
+      to,
+      templateSid,
+      mediaFilename,
+      twilioMessage: "Invalid recipient",
+    });
+    return res.status(400).json({
+      message: "Invalid recipient. Use whatsapp:+E164 or +E164.",
+      phase: "validation",
+      diagnosticId,
+    });
   }
   if (hasMedia && !isAllowedMediaUrl(mediaUrl)) {
+    diagnosticId = await writeTwilioDiagnostic({
+      phase: "validation",
+      status: "failed",
+      auth: authUser,
+      to,
+      templateSid,
+      mediaFilename,
+      twilioMessage: "Invalid media URL",
+    });
     return res.status(400).json({
       message: "mediaUrl must be an https URL on Firebase Storage / Google Cloud Storage.",
+      phase: "validation",
+      diagnosticId,
     });
   }
   if (templateSid && !isValidTwilioContentSid(templateSid)) {
-    return res.status(400).json({ message: "Invalid Twilio template/content SID." });
+    diagnosticId = await writeTwilioDiagnostic({
+      phase: "validation",
+      status: "failed",
+      auth: authUser,
+      to,
+      templateSid,
+      mediaFilename,
+      twilioMessage: "Invalid Twilio template/content SID",
+    });
+    return res.status(400).json({
+      message: "Invalid Twilio template/content SID.",
+      phase: "validation",
+      diagnosticId,
+    });
   }
   // Do not allow clients to override sender identity — use server secrets only
   messagingServiceSid = t.messagingServiceSid || "";
   from = t.whatsappFrom || "";
   if (!messagingServiceSid && !from) {
+    diagnosticId = await writeTwilioDiagnostic({
+      phase: "configuration",
+      status: "failed",
+      auth: authUser,
+      to,
+      templateSid,
+      mediaFilename,
+      twilioMessage: "Server sender not configured",
+    });
     return res.status(400).json({
       message:
         "Server sender not configured. Set TWILIO_MESSAGING_SERVICE_SID / TWILIO_WHATSAPP_FROM on the api function.",
+      phase: "configuration",
+      diagnosticId,
     });
   }
 
@@ -1027,7 +1585,41 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
   const templateVariables = readTemplateVariables(req.body?.templateVariables);
   if (hasMedia && !templateVariables["1"]) templateVariables["1"] = publicMediaUrl;
   if (hasMedia && !templateVariables["2"]) templateVariables["2"] = mediaFilename;
-  if (hasBody && !templateVariables["3"]) templateVariables["3"] = bodyText.trim();
+  if (hasMedia && !templateVariables["3"]) templateVariables["3"] = bodyText.trim() || `Please review ${mediaFilename}.`;
+  else if (hasBody && !templateVariables["3"]) templateVariables["3"] = bodyText.trim();
+
+  diagnosticId = await writeTwilioDiagnostic({
+    phase: "attempt",
+    status: "attempt",
+    auth: authUser,
+    to,
+    templateSid,
+    mediaFilename,
+    publicMediaUrl,
+  });
+
+  if (hasMedia) {
+    const preflight = await preflightMediaUrl(publicMediaUrl);
+    if (!preflight.ok) {
+      const failedDiagnosticId =
+        (await writeTwilioDiagnostic({
+          phase: "media_preflight",
+          status: "failed",
+          auth: authUser,
+          to,
+          templateSid,
+          mediaFilename,
+          publicMediaUrl,
+          twilioHttpStatus: preflight.status,
+          twilioMessage: preflight.message,
+        })) || diagnosticId;
+      return res.status(preflight.status).json({
+        message: preflight.message,
+        phase: "media_preflight",
+        diagnosticId: failedDiagnosticId,
+      });
+    }
+  }
 
   const params = new URLSearchParams();
   params.set("To", to);
@@ -1068,9 +1660,34 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
       return res.status(502).json({ message: "Unexpected Twilio response", raw: text.slice(0, 500) });
     }
     if (!apiRes.ok) {
+      const failedDiagnosticId =
+        (await writeTwilioDiagnostic({
+          phase: "twilio_api",
+          status: "failed",
+          auth: authUser,
+          to,
+          templateSid,
+          mediaFilename,
+          publicMediaUrl,
+          twilioHttpStatus: apiRes.status,
+          twilioCode: data.code,
+          twilioMessage: data.message,
+          twilioMoreInfo: data.more_info,
+        })) || diagnosticId;
+      if (apiRes.status === 401 || apiRes.status === 403) {
+        await sendOpsAlert({
+          type: "twilio.account_unavailable",
+          severity: "critical",
+          message: "Twilio rejected a send request with an auth/account status.",
+          details: { status: apiRes.status, code: data.code },
+        });
+      }
       return res.status(apiRes.status).json({
         message: (data.message as string) || (data.more_info as string) || "Twilio send failed",
         code: data.code,
+        moreInfo: data.more_info,
+        phase: "twilio_api",
+        diagnosticId: failedDiagnosticId,
       });
     }
 
@@ -1089,11 +1706,43 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
         logger.warn("Failed to seed Twilio status doc", seedErr);
       }
     }
+    await writeTwilioDiagnostic({
+      phase: "twilio_api",
+      status: "success",
+      auth: authUser,
+      to,
+      templateSid,
+      mediaFilename,
+      publicMediaUrl,
+      twilioHttpStatus: apiRes.status,
+      messageSid: sid || null,
+    });
+    await writeOpsAudit({
+      action: "twilio.send.success",
+      auth: authUser,
+      targetId: leadKeyFromPhone(to),
+      details: { sid, templateSid: templateSid || null, hasMedia },
+    });
 
     return res.status(201).json(data);
   } catch (err) {
     logger.error("Twilio send message error", err);
-    return res.status(502).json({ message: "Failed to reach Twilio API." });
+    const failedDiagnosticId =
+      (await writeTwilioDiagnostic({
+        phase: "twilio_api",
+        status: "failed",
+        auth: authUser,
+        to,
+        templateSid,
+        mediaFilename,
+        publicMediaUrl,
+        twilioMessage: err instanceof Error ? err.message : "Failed to reach Twilio API",
+      })) || diagnosticId;
+    return res.status(502).json({
+      message: "Failed to reach Twilio API.",
+      phase: "twilio_api",
+      diagnosticId: failedDiagnosticId,
+    });
   }
 });
 

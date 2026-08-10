@@ -3,6 +3,8 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import LessonBuilderPage from './pages/LessonBuilderPage';
 import SalesFunnelPage from './pages/SalesFunnelPage';
 import TwilioMessagingPage from './pages/TwilioMessagingPage';
+import OpsDashboardPage from './pages/OpsDashboardPage';
+import LeadTimelinePage from './pages/LeadTimelinePage';
 import LoginPage from './pages/LoginPage';
 import { AuthProvider } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -19,6 +21,26 @@ const App: React.FC = () => {
             <ProtectedRoute allowedRoles={['superadmin', 'associate', 'builder']}>
               <AppLayout>
                 <LessonBuilderPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dashboard"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson', 'whatsapp_manager']}>
+              <AppLayout>
+                <OpsDashboardPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/ops/leads/:id"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson', 'whatsapp_manager']}>
+              <AppLayout>
+                <LeadTimelinePage />
               </AppLayout>
             </ProtectedRoute>
           }

@@ -833,6 +833,42 @@ service cloud.firestore {
       );
       allow write: if false;
     }
+
+    match /twilioOutboundLogs/{logId} {
+      allow read: if isAuthenticated() && (
+        getUserRole() == 'superadmin' ||
+        getUserRole() == 'associate' ||
+        getUserRole() == 'whatsapp_manager'
+      );
+      allow write: if false;
+    }
+
+    match /twilioInboundMessages/{messageId} {
+      allow read: if isAuthenticated() && (
+        getUserRole() == 'superadmin' ||
+        getUserRole() == 'associate' ||
+        getUserRole() == 'whatsapp_manager'
+      );
+      allow write: if false;
+    }
+
+    match /leadAssignments/{threadId} {
+      allow read: if isAuthenticated() && (
+        getUserRole() == 'superadmin' ||
+        getUserRole() == 'associate' ||
+        getUserRole() == 'salesperson' ||
+        getUserRole() == 'whatsapp_manager'
+      );
+      allow write: if false;
+    }
+
+    match /opsAuditLog/{eventId} {
+      allow read: if isAuthenticated() && (
+        getUserRole() == 'superadmin' ||
+        getUserRole() == 'associate'
+      );
+      allow write: if false;
+    }
     
     // Production logs - for debugging and monitoring
     match /production_logs/{logId} {
@@ -843,4 +879,4 @@ service cloud.firestore {
       allow update, delete: if false;
     }
   }
-} 
+}

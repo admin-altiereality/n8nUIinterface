@@ -5,6 +5,7 @@ import { Avatar } from '../ui/avatar';
 import { Tooltip } from '../ui/tooltip';
 import {
   LayoutDashboard,
+  Gauge,
   Target,
   MessageCircle,
   LogOut,
@@ -21,6 +22,12 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
+  {
+    label: 'Dashboard',
+    path: '/dashboard',
+    icon: <Gauge className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson', 'whatsapp_manager'],
+  },
   {
     label: 'Builder',
     path: '/',

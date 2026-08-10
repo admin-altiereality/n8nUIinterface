@@ -22,12 +22,18 @@ import {
   fetchTwilioStatuses,
   getTwilioMessage,
   isTwilioStatusTerminal,
+  listTwilioSendDiagnostics,
+  listTwilioTemplates,
   listTwilioMessages,
   sendTwilioMessage,
   isTwilioAccountUnavailableError,
   type TwilioMessage,
   type TwilioHealth,
+  type TwilioSendDiagnostic,
+  type TwilioTemplate,
+  TwilioApiError,
 } from '../api/twilioClient';
+import { fetchLeadAssignment, updateLeadAssignment, type LeadAssignment } from '../api/opsClient';
 import { isFirebaseConfigured, uploadTwilioMediaToStorage } from '../lib/firebase';
 
 type Thread = {
@@ -44,6 +50,8 @@ type QueueFilter = 'all' | 'needsFollowUp' | 'highRisk' | 'failed' | 'seen';
 
 const STATUS_POLL_MS = 10000;
 const DOCUMENT_TEMPLATE_SID = 'HX9fab5aaad062c64423df7a312c84e6af';
+const MAX_WHATSAPP_MEDIA_BYTES = 16 * 1024 * 1024;
+const SUPPORTED_ATTACHMENT_TYPES = /^(image\/|video\/|audio\/|application\/pdf$)/i;
 
 type TwilioServiceState = 'unknown' | 'ok' | 'suspended';
 
@@ -209,7 +217,17 @@ export default function TwilioMessagingPage() {
   const [manualTo, setManualTo] = useState('');
   const [sending, setSending] = useState(false);
   const [sendInfo, setSendInfo] = useState<string | null>(null);
+  const [sendDiagnostic, setSendDiagnostic] = useState<{
+    phase?: string;
+    code?: string | number;
+    moreInfo?: string;
+    diagnosticId?: string;
+  } | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [templates, setTemplates] = useState<TwilioTemplate[]>([]);
+  const [diagnostics, setDiagnostics] = useState<TwilioSendDiagnostic[]>([]);
+  const [assignment, setAssignment] = useState<LeadAssignment | null>(null);
+  const [assignmentSaving, setAssignmentSaving] = useState(false);
 
   const firebaseEnabled = useMemo(() => isFirebaseConfigured(), []);
   const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
@@ -279,6 +297,12 @@ export default function TwilioMessagingPage() {
 
   useEffect(() => { void loadFirstPage(); }, [loadFirstPage]);
   useEffect(() => { return () => { if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl); }; }, [attachmentPreviewUrl]);
+
+  useEffect(() => {
+    if (serviceState === 'suspended') return;
+    void listTwilioTemplates().then(setTemplates).catch(() => setTemplates([]));
+    void listTwilioSendDiagnostics(10).then(setDiagnostics).catch(() => setDiagnostics([]));
+  }, [serviceState]);
 
   // Deep-link from Sales Funnel leads: /twilio-messaging?contact=+91...
   useEffect(() => {
@@ -372,6 +396,15 @@ export default function TwilioMessagingPage() {
   const normalizedManualTo = useMemo(() => normalizeRecipient(manualTo), [manualTo]);
 
   useEffect(() => {
+    const threadId = activeThread?.sendTo || activeThread?.contact;
+    if (!threadId || isNewChatMode) {
+      setAssignment(null);
+      return;
+    }
+    void fetchLeadAssignment(threadId).then(setAssignment).catch(() => setAssignment(null));
+  }, [activeThread?.sendTo, activeThread?.contact, isNewChatMode]);
+
+  useEffect(() => {
     if (!autoScroll) return;
     requestAnimationFrame(() => { messageEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' }); });
   }, [autoScroll, activeThread?.id, activeThread?.messages.length]);
@@ -384,7 +417,7 @@ export default function TwilioMessagingPage() {
     const to = isNewChatMode ? normalizedManualTo : activeThread?.sendTo;
     const text = composerText.trim();
     if (!to || (!text && !attachmentFile)) return;
-    setSending(true); setSendInfo(null);
+    setSending(true); setSendInfo(null); setSendDiagnostic(null);
     try {
       setAutoScroll(true);
       let mediaUrl: string | undefined;
@@ -397,7 +430,7 @@ export default function TwilioMessagingPage() {
         mediaFilename = attachmentFile.name;
         setSendInfo('Media uploaded. Sending to WhatsApp…');
       }
-      const bodyToSend = attachmentFile ? '' : text;
+      const bodyToSend = attachmentFile ? (text || `Please review ${attachmentFile.name}.`) : text;
       const sent = await sendTwilioMessage({
         to,
         body: bodyToSend,
@@ -425,6 +458,15 @@ export default function TwilioMessagingPage() {
         setSendInfo('Twilio account is suspended. Messaging is unavailable until the account is reactivated.');
       } else {
         setSendInfo(e instanceof Error ? e.message : 'Send failed.');
+        if (e instanceof TwilioApiError) {
+          setSendDiagnostic({
+            phase: e.phase,
+            code: e.code,
+            moreInfo: e.moreInfo,
+            diagnosticId: e.diagnosticId,
+          });
+          void listTwilioSendDiagnostics(10).then(setDiagnostics).catch(() => undefined);
+        }
       }
     }
     finally { setSending(false); }
@@ -436,6 +478,40 @@ export default function TwilioMessagingPage() {
   const removeAttachment = () => {
     if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
     setAttachmentPreviewUrl(null); setAttachmentFile(null);
+  };
+
+  const onAssignment = async (action: 'claim' | 'unclaim') => {
+    const threadId = activeThread?.sendTo || activeThread?.contact;
+    if (!threadId) return;
+    setAssignmentSaving(true);
+    setSendInfo(null);
+    try {
+      setAssignment(await updateLeadAssignment(threadId, action));
+    } catch (e) {
+      setSendInfo(e instanceof Error ? e.message : 'Assignment update failed.');
+    } finally {
+      setAssignmentSaving(false);
+    }
+  };
+
+  const selectAttachment = (file: File | null) => {
+    if (!file) {
+      removeAttachment();
+      return;
+    }
+    if (!SUPPORTED_ATTACHMENT_TYPES.test(file.type) && !file.name.toLowerCase().endsWith('.pdf')) {
+      setSendInfo('Unsupported file type. Attach a PDF, image, audio, or video file.');
+      return;
+    }
+    if (file.size > MAX_WHATSAPP_MEDIA_BYTES) {
+      setSendInfo('Attachment is too large for WhatsApp. Use a file under 16 MB.');
+      return;
+    }
+    if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
+    setAttachmentFile(file);
+    setAttachmentPreviewUrl(URL.createObjectURL(file));
+    setSendInfo(null);
+    setSendDiagnostic(null);
   };
 
   return (
@@ -584,6 +660,27 @@ export default function TwilioMessagingPage() {
               </div>
             </div>
             <div className="flex items-center gap-1">
+              {activeThread && !isNewChatMode && (
+                <>
+                  {assignment?.assignedTo ? (
+                    <Badge variant="info" className="mr-2 text-[9px]">
+                      {assignment.assignedToEmail || 'Claimed'}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="mr-2 text-[9px]">Unassigned</Badge>
+                  )}
+                  <button
+                    onClick={() => void onAssignment(assignment?.assignedTo ? 'unclaim' : 'claim')}
+                    disabled={assignmentSaving}
+                    className="mr-2 rounded-md border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 transition-all hover:bg-zinc-800 disabled:opacity-40"
+                  >
+                    {assignmentSaving ? 'Saving...' : assignment?.assignedTo ? 'Unclaim' : 'Claim'}
+                  </button>
+                </>
+              )}
+              {templates.some((t) => t.sid === DOCUMENT_TEMPLATE_SID) && (
+                <Badge variant="outline" className="text-[9px] mr-2">Template ready</Badge>
+              )}
               {twilioSuspended ? (
                 <Badge variant="warning" className="text-[9px] mr-2">Suspended</Badge>
               ) : health.ok ? (
@@ -728,6 +825,21 @@ export default function TwilioMessagingPage() {
               <p className={`text-[10px] font-medium text-center ${sendInfo.toLowerCase().includes('success') || sendInfo.toLowerCase().includes('sent') ? 'text-emerald-400' : 'text-amber-400'}`}>
                 {sendInfo}
               </p>
+              {sendDiagnostic && (
+                <div className="mx-auto mt-2 max-w-lg rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-[10px] text-amber-100">
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    {sendDiagnostic.phase && <span>Phase: {sendDiagnostic.phase}</span>}
+                    {sendDiagnostic.code && <span>Code: {sendDiagnostic.code}</span>}
+                    {sendDiagnostic.diagnosticId && <span>ID: {sendDiagnostic.diagnosticId}</span>}
+                  </div>
+                  {sendDiagnostic.moreInfo && <p className="mt-1 text-center text-amber-200/80">{sendDiagnostic.moreInfo}</p>}
+                </div>
+              )}
+              {!sendDiagnostic && diagnostics[0]?.status === 'failed' && (
+                <p className="mt-1 text-center text-[10px] text-zinc-500">
+                  Latest diagnostic: {diagnostics[0].phase} · {diagnostics[0].twilioMessage || diagnostics[0].mediaFilename || diagnostics[0].id}
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -735,8 +847,8 @@ export default function TwilioMessagingPage() {
 
       <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => {
         const file = e.target.files?.[0] || null;
-        setAttachmentFile(file);
-        if (file) setAttachmentPreviewUrl(URL.createObjectURL(file));
+        selectAttachment(file);
+        e.currentTarget.value = '';
       }} />
     </div>
   );

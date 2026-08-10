@@ -90,6 +90,31 @@ export type TwilioHealth = {
   source?: string;
 };
 
+export type TwilioTemplate = {
+  sid: string;
+  name: string;
+  channel: string;
+  mediaType?: string;
+  variables?: Record<string, string>;
+  isDefault?: boolean;
+};
+
+export type TwilioSendDiagnostic = {
+  id: string;
+  phase: string;
+  status: 'attempt' | 'success' | 'failed';
+  to?: string | null;
+  templateSid?: string | null;
+  mediaFilename?: string | null;
+  publicMediaUrl?: string | null;
+  twilioHttpStatus?: number | null;
+  twilioCode?: string | number | null;
+  twilioMessage?: string | null;
+  twilioMoreInfo?: string | null;
+  messageSid?: string | null;
+  createdAt?: string;
+};
+
 export type ListMessagesResult = {
   messages: TwilioMessage[];
   nextPageToken: string | null;
@@ -98,12 +123,22 @@ export type ListMessagesResult = {
 export class TwilioApiError extends Error {
   status: number;
   code?: string | number;
+  moreInfo?: string;
+  phase?: string;
+  diagnosticId?: string;
 
-  constructor(message: string, status: number, code?: string | number) {
+  constructor(message: string, status: number, code?: string | number, details?: {
+    moreInfo?: string;
+    phase?: string;
+    diagnosticId?: string;
+  }) {
     super(message);
     this.name = 'TwilioApiError';
     this.status = status;
     this.code = code;
+    this.moreInfo = details?.moreInfo;
+    this.phase = details?.phase;
+    this.diagnosticId = details?.diagnosticId;
   }
 }
 
@@ -124,9 +159,16 @@ async function parseTwilioError(r: Response, fallback: string): Promise<never> {
   const data = (await r.json().catch(() => ({}))) as {
     message?: string;
     code?: string | number;
+    moreInfo?: string;
+    phase?: string;
+    diagnosticId?: string;
   };
   const message = typeof data.message === 'string' ? data.message : fallback;
-  throw new TwilioApiError(message, r.status, data.code);
+  throw new TwilioApiError(message, r.status, data.code, {
+    moreInfo: data.moreInfo,
+    phase: data.phase,
+    diagnosticId: data.diagnosticId,
+  });
 }
 
 export async function fetchTwilioHealth(): Promise<TwilioHealth> {
@@ -136,6 +178,26 @@ export async function fetchTwilioHealth(): Promise<TwilioHealth> {
   }
   const data = (await r.json().catch(() => ({}))) as TwilioHealth;
   return { ok: data.ok, accountHint: data.accountHint ?? null, source: data.source };
+}
+
+export async function listTwilioTemplates(): Promise<TwilioTemplate[]> {
+  const r = await fetch(twilioUrl('/templates'), { headers: await authHeaders() });
+  if (!r.ok) {
+    await parseTwilioError(r, 'Failed to list Twilio templates');
+  }
+  const data = (await r.json().catch(() => ({}))) as { templates?: TwilioTemplate[] };
+  return Array.isArray(data.templates) ? data.templates : [];
+}
+
+export async function listTwilioSendDiagnostics(limit = 25): Promise<TwilioSendDiagnostic[]> {
+  const r = await fetch(twilioUrl(`/send-diagnostics?limit=${encodeURIComponent(limit)}`), {
+    headers: await authHeaders(),
+  });
+  if (!r.ok) {
+    await parseTwilioError(r, 'Failed to load Twilio diagnostics');
+  }
+  const data = (await r.json().catch(() => ({}))) as { diagnostics?: TwilioSendDiagnostic[] };
+  return Array.isArray(data.diagnostics) ? data.diagnostics : [];
 }
 
 export async function listTwilioMessages(options: {
@@ -227,10 +289,17 @@ export async function sendTwilioMessage(payload: {
     const data = (await r.json().catch(() => ({}))) as {
       message?: string;
       code?: string | number;
+      moreInfo?: string;
+      phase?: string;
+      diagnosticId?: string;
     };
     const message = typeof data.message === 'string' ? data.message : 'Send failed';
     const code = data.code ? ` (code: ${data.code})` : '';
-    throw new TwilioApiError(`${message}${code}`, r.status, data.code);
+    throw new TwilioApiError(`${message}${code}`, r.status, data.code, {
+      moreInfo: data.moreInfo,
+      phase: data.phase,
+      diagnosticId: data.diagnosticId,
+    });
   }
   return (await r.json().catch(() => ({}))) as TwilioMessage;
 }
