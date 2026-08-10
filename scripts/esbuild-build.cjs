@@ -1,8 +1,7 @@
 /**
  * Fallback production build when Vite hangs on this host.
- * JS via esbuild; CSS via PostCSS + Tailwind.
+ * JS via esbuild; CSS via app CSS + browser Tailwind fallback.
  */
-const esbuild = require('esbuild');
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -64,48 +63,39 @@ function createViteEnvDefines() {
 }
 
 console.log('Bundling JS with esbuild…');
-esbuild
-  .build({
-    entryPoints: [path.join(root, 'src/main.tsx')],
-    bundle: true,
-    outfile: jsOut,
-    format: 'esm',
-    jsx: 'automatic',
-    platform: 'browser',
-    target: ['es2020'],
-    sourcemap: false,
-    minify: true,
-    define: createViteEnvDefines(),
-    loader: {
-      '.tsx': 'tsx',
-      '.ts': 'ts',
-      '.css': 'empty',
-      '.svg': 'dataurl',
-      '.png': 'dataurl',
-      '.jpg': 'dataurl',
-      '.jpeg': 'dataurl',
-      '.gif': 'dataurl',
-      '.webp': 'dataurl',
-    },
-    logLevel: 'info',
-  })
-  .then(() => {
-    console.log('Building CSS with postcss…');
-    const node = process.execPath;
-    const postcssCli = path.join(root, 'node_modules/postcss-cli/bin/postcss');
-    const alt = path.join(root, 'node_modules/.bin/postcss');
-    const cli = fs.existsSync(postcssCli) ? postcssCli : alt;
-    if (fs.existsSync(cli)) {
-      execFileSync(node, [cli, path.join(root, 'src/styles.css'), '-o', cssOut], {
-        cwd: root,
-        stdio: 'inherit',
-        env: process.env,
-      });
-    } else {
-      // Fallback: copy previous built CSS if present in git worktree cache
-      console.warn('postcss CLI missing; writing minimal CSS');
-      fs.copyFileSync(path.join(root, 'src/styles.css'), cssOut);
-    }
+try {
+  const esbuildBin = path.join(root, 'node_modules/.bin/esbuild');
+  const define = createViteEnvDefines();
+  execFileSync(
+    esbuildBin,
+    [
+      path.join(root, 'src/main.tsx'),
+      '--bundle',
+      `--outfile=${jsOut}`,
+      '--format=esm',
+      '--jsx=automatic',
+      '--platform=browser',
+      '--target=es2020',
+      '--minify',
+      '--loader:.css=empty',
+      '--loader:.svg=dataurl',
+      '--loader:.png=dataurl',
+      '--loader:.jpg=dataurl',
+      '--loader:.jpeg=dataurl',
+      '--loader:.gif=dataurl',
+      '--loader:.webp=dataurl',
+      ...Object.entries(define).map(([key, value]) => `--define:${key}=${value}`),
+    ],
+    { cwd: root, stdio: 'inherit' }
+  );
+
+    console.log('Writing app CSS…');
+    const appCss = fs
+      .readFileSync(path.join(root, 'src/styles.css'), 'utf8')
+      .split('\n')
+      .filter((line) => !line.includes("@import 'tailwindcss'") && !line.trim().startsWith('@source '))
+      .join('\n');
+    fs.writeFileSync(cssOut, appCss);
 
     const html = `<!doctype html>
 <html lang="en">
@@ -116,6 +106,7 @@ esbuild
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#09090b" />
     <link rel="stylesheet" href="/assets/index.css" />
+    <script src="https://cdn.tailwindcss.com"></script>
   </head>
   <body>
     <div id="root"></div>
@@ -140,8 +131,7 @@ esbuild
       throw new Error('Build output contains n8n API credential material.');
     }
     console.log('Build complete → dist/');
-  })
-  .catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+} catch (err) {
+  console.error(err);
+  process.exit(1);
+}
