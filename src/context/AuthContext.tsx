@@ -40,7 +40,7 @@ async function buildAppUser(fbUser: FirebaseUser): Promise<User> {
 
 async function bridgeDataAuth(fbUser: FirebaseUser): Promise<void> {
   if (!isFirebaseConfigured()) return;
-  if (import.meta.env.VITE_ENABLE_DATA_AUTH_BRIDGE !== 'true') return;
+  if (import.meta.env.VITE_ENABLE_DATA_AUTH_BRIDGE === 'false') return;
   try {
     await ensureDataAuthSession(fbUser);
   } catch (e) {

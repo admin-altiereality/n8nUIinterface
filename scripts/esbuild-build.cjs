@@ -1,11 +1,12 @@
 /**
  * Fallback production build when Vite hangs on this host.
- * JS via esbuild; CSS via app CSS + browser Tailwind fallback.
+ * JS via esbuild; CSS via Tailwind CLI.
  */
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const dotenv = require('dotenv');
+const esbuild = require('esbuild');
 
 const root = path.resolve(__dirname, '..');
 const dist = path.join(root, 'dist');
@@ -63,41 +64,39 @@ function createViteEnvDefines() {
 }
 
 console.log('Bundling JS with esbuild…');
+(async () => {
 try {
-  const esbuildBin = path.join(root, 'node_modules/.bin/esbuild');
   const define = createViteEnvDefines();
+  await esbuild.build({
+    entryPoints: [path.join(root, 'src/main.tsx')],
+    bundle: true,
+    outfile: jsOut,
+    format: 'esm',
+    jsx: 'automatic',
+    platform: 'browser',
+    target: 'es2020',
+    minify: true,
+    loader: {
+      '.css': 'empty',
+      '.svg': 'dataurl',
+      '.png': 'dataurl',
+      '.jpg': 'dataurl',
+      '.jpeg': 'dataurl',
+      '.gif': 'dataurl',
+      '.webp': 'dataurl',
+    },
+    define,
+    logLevel: 'info',
+  });
+
+  console.log('Building CSS with Tailwind CLI…');
   execFileSync(
-    esbuildBin,
-    [
-      path.join(root, 'src/main.tsx'),
-      '--bundle',
-      `--outfile=${jsOut}`,
-      '--format=esm',
-      '--jsx=automatic',
-      '--platform=browser',
-      '--target=es2020',
-      '--minify',
-      '--loader:.css=empty',
-      '--loader:.svg=dataurl',
-      '--loader:.png=dataurl',
-      '--loader:.jpg=dataurl',
-      '--loader:.jpeg=dataurl',
-      '--loader:.gif=dataurl',
-      '--loader:.webp=dataurl',
-      ...Object.entries(define).map(([key, value]) => `--define:${key}=${value}`),
-    ],
+    path.join(root, 'node_modules/.bin/tailwindcss'),
+    ['-i', path.join(root, 'src/styles.css'), '-o', cssOut, '--minify'],
     { cwd: root, stdio: 'inherit' }
   );
 
-    console.log('Writing app CSS…');
-    const appCss = fs
-      .readFileSync(path.join(root, 'src/styles.css'), 'utf8')
-      .split('\n')
-      .filter((line) => !line.includes("@import 'tailwindcss'") && !line.trim().startsWith('@source '))
-      .join('\n');
-    fs.writeFileSync(cssOut, appCss);
-
-    const html = `<!doctype html>
+  const html = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -106,7 +105,6 @@ try {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#09090b" />
     <link rel="stylesheet" href="/assets/index.css" />
-    <script src="https://cdn.tailwindcss.com"></script>
   </head>
   <body>
     <div id="root"></div>
@@ -114,24 +112,25 @@ try {
   </body>
 </html>
 `;
-    fs.writeFileSync(path.join(dist, 'index.html'), html);
-    const js = fs.readFileSync(jsOut, 'utf8');
-    if (js.includes('import.meta.env')) {
-      throw new Error('Build left unresolved import.meta.env references in the browser bundle.');
-    }
-    const forbiddenFragments = [
-      'VITE_N8N_API_KEY',
-      'VITE_N8N_ACCESS_TOKEN',
-      'X-N8N-API-KEY',
-      process.env.N8N_API_KEY,
-      process.env.N8N_ACCESS_TOKEN,
-    ].filter(Boolean);
-    const leaked = forbiddenFragments.filter((fragment) => js.includes(fragment));
-    if (leaked.length) {
-      throw new Error('Build output contains n8n API credential material.');
-    }
-    console.log('Build complete → dist/');
+  fs.writeFileSync(path.join(dist, 'index.html'), html);
+  const js = fs.readFileSync(jsOut, 'utf8');
+  if (js.includes('import.meta.env')) {
+    throw new Error('Build left unresolved import.meta.env references in the browser bundle.');
+  }
+  const forbiddenFragments = [
+    'VITE_N8N_API_KEY',
+    'VITE_N8N_ACCESS_TOKEN',
+    'X-N8N-API-KEY',
+    process.env.N8N_API_KEY,
+    process.env.N8N_ACCESS_TOKEN,
+  ].filter(Boolean);
+  const leaked = forbiddenFragments.filter((fragment) => js.includes(fragment));
+  if (leaked.length) {
+    throw new Error('Build output contains n8n API credential material.');
+  }
+  console.log('Build complete → dist/');
 } catch (err) {
   console.error(err);
   process.exit(1);
 }
+})();
