@@ -23,6 +23,7 @@ import {
   getTwilioMessage,
   isTwilioStatusTerminal,
   listTwilioSendDiagnostics,
+  listTwilioInboundMessages,
   listTwilioTemplates,
   listTwilioMessages,
   sendTwilioMessage,
@@ -49,6 +50,7 @@ type Thread = {
 type QueueFilter = 'all' | 'needsFollowUp' | 'highRisk' | 'failed' | 'seen';
 
 const STATUS_POLL_MS = 10000;
+const INBOUND_POLL_MS = 12000;
 const DOCUMENT_TEMPLATE_SID = 'HX9fab5aaad062c64423df7a312c84e6af';
 const MAX_WHATSAPP_MEDIA_BYTES = 16 * 1024 * 1024;
 const SUPPORTED_ATTACHMENT_TYPES = /^(image\/|video\/|audio\/|application\/pdf$)/i;
@@ -117,6 +119,18 @@ function buildThreads(messages: TwilioMessage[]): Thread[] {
   }
   threads.sort((a, b) => b.lastAt - a.lastAt);
   return threads;
+}
+
+function mergeMessages(current: TwilioMessage[], incoming: TwilioMessage[]): TwilioMessage[] {
+  const map = new Map<string, TwilioMessage>();
+  for (const message of current) {
+    if (message.sid) map.set(message.sid, message);
+  }
+  for (const message of incoming) {
+    if (!message.sid) continue;
+    map.set(message.sid, { ...(map.get(message.sid) || {}), ...message });
+  }
+  return [...map.values()].sort((a, b) => messageTime(a) - messageTime(b));
 }
 
 function threadLastInbound(thread: Thread): TwilioMessage | null {
@@ -300,8 +314,29 @@ export default function TwilioMessagingPage() {
 
   useEffect(() => {
     if (serviceState === 'suspended') return;
-    void listTwilioTemplates().then(setTemplates).catch(() => setTemplates([]));
+    void listTwilioTemplates().then((items) => {
+      setTemplates(items);
+    }).catch(() => setTemplates([]));
     void listTwilioSendDiagnostics(10).then(setDiagnostics).catch(() => setDiagnostics([]));
+  }, [serviceState]);
+
+  useEffect(() => {
+    if (serviceState === 'suspended') return;
+    let cancelled = false;
+    const refreshInbound = async () => {
+      try {
+        const inbound = await listTwilioInboundMessages(100);
+        if (!cancelled && inbound.length) setMessages((prev) => mergeMessages(prev, inbound));
+      } catch {
+        // keep the Twilio list as fallback when Firestore inbound polling is transiently unavailable
+      }
+    };
+    void refreshInbound();
+    const id = setInterval(() => void refreshInbound(), INBOUND_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [serviceState]);
 
   // Deep-link from Sales Funnel leads: /twilio-messaging?contact=+91...
@@ -436,7 +471,7 @@ export default function TwilioMessagingPage() {
         body: bodyToSend,
         mediaUrl,
         mediaFilename,
-        templateSid: attachmentFile ? DOCUMENT_TEMPLATE_SID : undefined,
+        templateSid: undefined,
       });
       setComposerText('');
       if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);

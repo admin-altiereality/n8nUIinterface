@@ -38,8 +38,8 @@ function twilioUrl(pathAndQuery: string): string {
   return `${root.replace(/\/$/, '')}${p}`;
 }
 
-async function authHeaders(extra?: HeadersInit): Promise<HeadersInit> {
-  const token = await getAuthIdToken();
+async function authHeaders(extra?: HeadersInit, forceRefresh = false): Promise<HeadersInit> {
+  const token = await getAuthIdToken(forceRefresh);
   if (!token) {
     throw new Error('Not signed in. Please log in again.');
   }
@@ -47,6 +47,12 @@ async function authHeaders(extra?: HeadersInit): Promise<HeadersInit> {
     ...(extra || {}),
     Authorization: `Bearer ${token}`,
   };
+}
+
+async function fetchWithAuthRetry(url: string, init?: RequestInit): Promise<Response> {
+  const first = await fetch(url, { ...init, headers: await authHeaders(init?.headers) });
+  if (first.status !== 401) return first;
+  return fetch(url, { ...init, headers: await authHeaders(init?.headers, true) });
 }
 
 export type TwilioMessage = {
@@ -172,7 +178,7 @@ async function parseTwilioError(r: Response, fallback: string): Promise<never> {
 }
 
 export async function fetchTwilioHealth(): Promise<TwilioHealth> {
-  const r = await fetch(twilioUrl('/health'), { headers: await authHeaders() });
+  const r = await fetchWithAuthRetry(twilioUrl('/health'));
   if (!r.ok) {
     await parseTwilioError(r, 'Twilio health check failed');
   }
@@ -181,7 +187,7 @@ export async function fetchTwilioHealth(): Promise<TwilioHealth> {
 }
 
 export async function listTwilioTemplates(): Promise<TwilioTemplate[]> {
-  const r = await fetch(twilioUrl('/templates'), { headers: await authHeaders() });
+  const r = await fetchWithAuthRetry(twilioUrl('/templates'));
   if (!r.ok) {
     await parseTwilioError(r, 'Failed to list Twilio templates');
   }
@@ -190,14 +196,21 @@ export async function listTwilioTemplates(): Promise<TwilioTemplate[]> {
 }
 
 export async function listTwilioSendDiagnostics(limit = 25): Promise<TwilioSendDiagnostic[]> {
-  const r = await fetch(twilioUrl(`/send-diagnostics?limit=${encodeURIComponent(limit)}`), {
-    headers: await authHeaders(),
-  });
+  const r = await fetchWithAuthRetry(twilioUrl(`/send-diagnostics?limit=${encodeURIComponent(limit)}`));
   if (!r.ok) {
     await parseTwilioError(r, 'Failed to load Twilio diagnostics');
   }
   const data = (await r.json().catch(() => ({}))) as { diagnostics?: TwilioSendDiagnostic[] };
   return Array.isArray(data.diagnostics) ? data.diagnostics : [];
+}
+
+export async function listTwilioInboundMessages(limit = 100): Promise<TwilioMessage[]> {
+  const r = await fetchWithAuthRetry(twilioUrl(`/inbound?limit=${encodeURIComponent(limit)}`));
+  if (!r.ok) {
+    await parseTwilioError(r, 'Failed to load inbound WhatsApp messages');
+  }
+  const data = (await r.json().catch(() => ({}))) as { messages?: TwilioMessage[] };
+  return Array.isArray(data.messages) ? data.messages : [];
 }
 
 export async function listTwilioMessages(options: {
@@ -212,7 +225,7 @@ export async function listTwilioMessages(options: {
   const qs = q.toString();
   const path = qs ? `/messages?${qs}` : '/messages';
 
-  const r = await fetch(twilioUrl(path), { headers: await authHeaders() });
+  const r = await fetchWithAuthRetry(twilioUrl(path));
   if (!r.ok) {
     await parseTwilioError(r, 'Failed to list messages');
   }
@@ -224,9 +237,7 @@ export async function listTwilioMessages(options: {
 }
 
 export async function getTwilioMessage(sid: string): Promise<TwilioMessage> {
-  const r = await fetch(twilioUrl(`/messages/${encodeURIComponent(sid)}`), {
-    headers: await authHeaders(),
-  });
+  const r = await fetchWithAuthRetry(twilioUrl(`/messages/${encodeURIComponent(sid)}`));
   if (!r.ok) {
     await parseTwilioError(r, 'Failed to load message');
   }
@@ -234,9 +245,7 @@ export async function getTwilioMessage(sid: string): Promise<TwilioMessage> {
 }
 
 export async function getTwilioMessageStatus(sid: string): Promise<TwilioMessageStatusDoc | null> {
-  const r = await fetch(twilioUrl(`/messages/${encodeURIComponent(sid)}/status`), {
-    headers: await authHeaders(),
-  });
+  const r = await fetchWithAuthRetry(twilioUrl(`/messages/${encodeURIComponent(sid)}/status`));
   if (r.status === 404) return null;
   if (!r.ok) {
     await parseTwilioError(r, 'Failed to load message status');
@@ -250,9 +259,7 @@ export async function fetchTwilioStatuses(
   const unique = [...new Set(sids.filter(Boolean))].slice(0, 50);
   if (!unique.length) return {};
   const q = new URLSearchParams({ sids: unique.join(',') });
-  const r = await fetch(twilioUrl(`/statuses?${q.toString()}`), {
-    headers: await authHeaders(),
-  });
+  const r = await fetchWithAuthRetry(twilioUrl(`/statuses?${q.toString()}`));
   if (!r.ok) {
     await parseTwilioError(r, 'Failed to load message statuses');
   }
@@ -272,9 +279,9 @@ export async function sendTwilioMessage(payload: {
   templateSid?: string;
   templateVariables?: Record<string, string>;
 }): Promise<TwilioMessage> {
-  const r = await fetch(twilioUrl('/messages'), {
+  const r = await fetchWithAuthRetry(twilioUrl('/messages'), {
     method: 'POST',
-    headers: await authHeaders({ 'Content-Type': 'application/json' }),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       to: payload.to,
       body: payload.body,

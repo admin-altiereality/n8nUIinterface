@@ -58,7 +58,15 @@ export interface N8nExecutionListItem {
   status: 'running' | 'success' | 'error' | 'waiting';
   mode?: string;
   workflowId?: string;
+  source?: string;
 }
+
+export type SalesExecutionsMeta = {
+  source: 'n8n' | 'firestore' | 'unknown';
+  warning?: string;
+};
+
+export let lastSalesExecutionsMeta: SalesExecutionsMeta = { source: 'unknown' };
 
 const WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL as string | undefined;
 const API_PROXY_URL = import.meta.env.VITE_API_PROXY_URL as string | undefined;
@@ -74,12 +82,18 @@ function getProxyBase(): string | null {
   return null;
 }
 
-async function authHeaders(): Promise<HeadersInit> {
-  const token = await getAuthIdToken();
+async function authHeaders(forceRefresh = false): Promise<HeadersInit> {
+  const token = await getAuthIdToken(forceRefresh);
   if (!token) {
     throw new Error('Not signed in. Please log in again.');
   }
   return { Authorization: `Bearer ${token}` };
+}
+
+async function fetchWithAuthRetry(url: string, init?: RequestInit): Promise<Response> {
+  const first = await fetch(url, { ...init, headers: { ...(init?.headers || {}), ...(await authHeaders()) } });
+  if (first.status !== 401) return first;
+  return fetch(url, { ...init, headers: { ...(init?.headers || {}), ...(await authHeaders(true)) } });
 }
 
 /**
@@ -164,7 +178,7 @@ export async function getExecutionStatus(executionId: string): Promise<N8nExecut
   const proxyUrl = `${base}/api/n8n/executions/${encodeURIComponent(executionId)}`;
 
   try {
-    const res = await fetch(proxyUrl, { headers: await authHeaders() });
+    const res = await fetchWithAuthRetry(proxyUrl);
     if (!res.ok) return null;
     return (await res.json()) as N8nExecution;
   } catch {
@@ -190,13 +204,34 @@ export async function listExecutions(
   const proxyUrl = `${base}/api/n8n/executions?limit=${encodeURIComponent(limit)}${workflowParam}`;
 
   try {
-    const res = await fetch(proxyUrl, { headers: await authHeaders() });
-    if (!res.ok) return null;
-    const json = (await res.json()) as { data?: N8nExecutionListItem[] } | N8nExecutionListItem[];
-    if (Array.isArray(json)) return json;
-    if (json && Array.isArray(json.data)) return json.data;
+    const res = await fetchWithAuthRetry(proxyUrl);
+    if (!res.ok) {
+      lastSalesExecutionsMeta = { source: 'unknown', warning: `Execution API failed (${res.status}).` };
+      return null;
+    }
+    const json = (await res.json()) as {
+      data?: N8nExecutionListItem[];
+      source?: string;
+      warning?: string;
+    } | N8nExecutionListItem[];
+    if (Array.isArray(json)) {
+      lastSalesExecutionsMeta = { source: 'n8n' };
+      return json;
+    }
+    if (json && Array.isArray(json.data)) {
+      lastSalesExecutionsMeta = {
+        source: json.source === 'firestore' ? 'firestore' : 'n8n',
+        warning: json.warning,
+      };
+      return json.data;
+    }
+    lastSalesExecutionsMeta = { source: 'unknown', warning: 'Execution API returned an unexpected response.' };
     return null;
-  } catch {
+  } catch (e) {
+    lastSalesExecutionsMeta = {
+      source: 'unknown',
+      warning: e instanceof Error ? e.message : 'Execution API request failed.',
+    };
     return null;
   }
 }
@@ -215,7 +250,7 @@ export async function listSalesExecutions(
   const proxyUrl = `${base}/api/n8n/sales-executions?limit=${encodeURIComponent(limit)}${workflowParam}`;
 
   try {
-    const res = await fetch(proxyUrl, { headers: await authHeaders() });
+    const res = await fetchWithAuthRetry(proxyUrl);
     if (!res.ok) return null;
     const json = (await res.json()) as { data?: N8nExecutionListItem[] } | N8nExecutionListItem[];
     if (Array.isArray(json)) return json;
@@ -235,7 +270,7 @@ export async function getSalesExecutionStatus(executionId: string): Promise<N8nE
   const proxyUrl = `${base}/api/n8n/sales-executions/${encodeURIComponent(executionId)}`;
 
   try {
-    const res = await fetch(proxyUrl, { headers: await authHeaders() });
+    const res = await fetchWithAuthRetry(proxyUrl);
     if (!res.ok) return null;
     return (await res.json()) as N8nExecution;
   } catch {

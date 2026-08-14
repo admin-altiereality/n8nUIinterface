@@ -41,6 +41,7 @@ try {
 
   const msgSid = process.env.TWILIO_MESSAGING_SERVICE_SID?.trim() ?? '';
   const waFrom = process.env.TWILIO_WHATSAPP_FROM?.trim() ?? '';
+  const opsAlertWebhook = process.env.OPS_ALERT_EMAIL_WEBHOOK_URL?.trim() ?? '';
   const esc = (v) => {
     if (!v) return '';
     if (/[#\s"']/.test(v)) return `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
@@ -48,9 +49,9 @@ try {
   };
   fs.writeFileSync(
     path.join(root, 'functions', '.env'),
-    `TWILIO_MESSAGING_SERVICE_SID=${esc(msgSid)}\nTWILIO_WHATSAPP_FROM=${esc(waFrom)}\n`
+    `TWILIO_MESSAGING_SERVICE_SID=${esc(msgSid)}\nTWILIO_WHATSAPP_FROM=${esc(waFrom)}\nOPS_ALERT_EMAIL_WEBHOOK_URL=${esc(opsAlertWebhook)}\n`
   );
-  console.log('Wrote functions/.env (optional sender defaults for deploy).');
+  console.log('Wrote functions/.env (optional sender defaults + ops alert webhook for deploy).');
 
   console.log('\nDone. Redeploy so the api function picks up secrets:');
   console.log('  firebase deploy --only functions\n');

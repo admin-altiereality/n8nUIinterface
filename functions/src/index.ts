@@ -62,8 +62,8 @@ const TWILIO_OUTBOUND_LOGS_COLLECTION = "twilioOutboundLogs";
 const TWILIO_INBOUND_COLLECTION = "twilioInboundMessages";
 const LEAD_ASSIGNMENTS_COLLECTION = "leadAssignments";
 const OPS_AUDIT_COLLECTION = "opsAuditLog";
-const DEFAULT_WHATSAPP_DOCUMENT_TEMPLATE_SID = "HX9fab5aaad062c64423df7a312c84e6af";
-const DEFAULT_DOCUMENT_TEMPLATE_NAME = "LearnXR document";
+const DEFAULT_WHATSAPP_QUICK_REPLY_TEMPLATE_SID = "HX9fab5aaad062c64423df7a312c84e6af";
+const DEFAULT_QUICK_REPLY_TEMPLATE_NAME = "LearnXR quick reply";
 const MEDIA_SIZE_LIMIT_BYTES = 16 * 1024 * 1024;
 const SUPPORTED_MEDIA_CONTENT_TYPE = /^(image\/|video\/|audio\/|application\/pdf$)/i;
 const TWILIO_STATUS_RANK: Record<string, number> = {
@@ -78,6 +78,9 @@ const TWILIO_STATUS_RANK: Record<string, number> = {
   failed: 100,
   canceled: 100,
 };
+const ALERT_STATE_COLLECTION = "opsAlertState";
+const OPS_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
+const TWILIO_FAILURE_THRESHOLD = 5;
 
 const CORS_ALLOWED_ORIGINS = new Set([
   "https://agents.altiereality.com",
@@ -436,6 +439,37 @@ async function sendOpsAlert(input: {
   }
 }
 
+async function sendRateLimitedOpsAlert(
+  key: string,
+  input: {
+    type: string;
+    severity: "info" | "warning" | "critical";
+    message: string;
+    details?: Record<string, unknown>;
+  },
+  cooldownMs = OPS_ALERT_COOLDOWN_MS
+): Promise<void> {
+  try {
+    const ref = getDataProjectDb().collection(ALERT_STATE_COLLECTION).doc(key);
+    const snap = await ref.get();
+    const lastSentAt = snap.exists ? parseMaybeDate((snap.data() || {}).lastSentAt) : 0;
+    if (lastSentAt && Date.now() - lastSentAt < cooldownMs) return;
+    await sendOpsAlert(input);
+    await ref.set(
+      {
+        key,
+        type: input.type,
+        severity: input.severity,
+        lastSentAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    logger.warn("rate-limited ops alert failed", err);
+  }
+}
+
 async function writeTwilioDiagnostic(input: {
   phase: string;
   status: "attempt" | "success" | "failed";
@@ -503,6 +537,44 @@ function validateTwilioRequestSignature(
   }
 }
 
+function twilioSignatureUrlCandidates(req: express.Request, path: string): string[] {
+  const base = getPublicApiBase(req).replace(/\/$/, "");
+  const originalPath = (req.originalUrl || req.url || path).split("?")[0] || path;
+  const host = (req.get("host") || "").split(",")[0]!.trim();
+  const forwardedProto = (req.get("x-forwarded-proto") || "https").split(",")[0]!.trim();
+  const candidates = new Set<string>([
+    `${base}${path}`,
+    `${base}${originalPath}`,
+    `https://agents-altiereality-com.web.app${path}`,
+    `https://agents-altiereality-com.web.app${originalPath}`,
+    `https://agents.altiereality.com${path}`,
+    `https://agents.altiereality.com${originalPath}`,
+    `https://us-central1-lexrn1.cloudfunctions.net/api${path}`,
+    `https://us-central1-lexrn1.cloudfunctions.net/api${originalPath}`,
+    `https://api-l77silc7tq-uc.a.run.app${path}`,
+    `https://api-l77silc7tq-uc.a.run.app${originalPath}`,
+  ]);
+  if (host) {
+    candidates.add(`${forwardedProto}://${host}${path}`);
+    candidates.add(`${forwardedProto}://${host}${originalPath}`);
+    candidates.add(`https://${host}${path}`);
+    candidates.add(`https://${host}${originalPath}`);
+  }
+  for (const value of [...candidates]) {
+    candidates.add(`${value}/`);
+  }
+  return [...candidates];
+}
+
+function validateTwilioRequestForAnyUrl(
+  authToken: string,
+  signature: string | undefined,
+  urls: string[],
+  params: Record<string, string>
+): boolean {
+  return urls.some((url) => validateTwilioRequestSignature(authToken, signature, url, params));
+}
+
 function shouldAdvanceTwilioStatus(prev: string | undefined, next: string): boolean {
   const n = String(next || "").toLowerCase();
   if (!n) return false;
@@ -547,6 +619,73 @@ async function upsertTwilioMessageStatus(input: {
     },
     { merge: true }
   );
+}
+
+function isFailedTwilioStatus(value: unknown): boolean {
+  return ["failed", "undelivered", "canceled"].includes(safeText(value).toLowerCase());
+}
+
+async function maybeAlertTwilioFailureThreshold(): Promise<void> {
+  try {
+    const since = new Date(Date.now() - OPS_ALERT_COOLDOWN_MS).toISOString();
+    const snap = await getDataProjectDb()
+      .collection(TWILIO_STATUS_COLLECTION)
+      .where("updatedAt", ">=", since)
+      .limit(200)
+      .get();
+    const failures = snap.docs.map((d) => d.data() || {}).filter((d) => isFailedTwilioStatus(d.status));
+    if (failures.length < TWILIO_FAILURE_THRESHOLD) return;
+    await sendRateLimitedOpsAlert("twilio_failure_threshold", {
+      type: "twilio.failure_threshold",
+      severity: "warning",
+      message: `${failures.length} WhatsApp delivery failures were logged in the last hour.`,
+      details: {
+        threshold: TWILIO_FAILURE_THRESHOLD,
+        failures: failures.slice(0, 10).map((f) => ({
+          sid: f.sid || null,
+          to: f.to || null,
+          status: f.status || null,
+          errorCode: f.errorCode || null,
+        })),
+      },
+    });
+  } catch (err) {
+    logger.warn("twilio failure threshold alert check failed", err);
+  }
+}
+
+function bestTwilioStatusByPhone(statuses: Record<string, unknown>[]): Map<string, Record<string, unknown>> {
+  const byPhone = new Map<string, Record<string, unknown>>();
+  for (const status of statuses) {
+    const phone = leadKeyFromPhone(status.to || status.from);
+    if (!phone || phone === "unknown") continue;
+    const prev = byPhone.get(phone);
+    if (!prev) {
+      byPhone.set(phone, status);
+      continue;
+    }
+    const prevRank = TWILIO_STATUS_RANK[safeText(prev.status).toLowerCase()] ?? -1;
+    const nextRank = TWILIO_STATUS_RANK[safeText(status.status).toLowerCase()] ?? -1;
+    const prevTime = parseMaybeDate(prev.updatedAt);
+    const nextTime = parseMaybeDate(status.updatedAt);
+    if (nextRank > prevRank || (nextRank === prevRank && nextTime >= prevTime)) {
+      byPhone.set(phone, status);
+    }
+  }
+  return byPhone;
+}
+
+function inboundByPhone(inbound: Record<string, unknown>[]): Map<string, Record<string, unknown>> {
+  const byPhone = new Map<string, Record<string, unknown>>();
+  for (const message of inbound) {
+    const phone = leadKeyFromPhone(message.from || message.From);
+    if (!phone || phone === "unknown") continue;
+    const prev = byPhone.get(phone);
+    if (!prev || parseMaybeDate(message.createdAt) >= parseMaybeDate(prev.createdAt)) {
+      byPhone.set(phone, message);
+    }
+  }
+  return byPhone;
 }
 
 function filterLeadRows(rows: unknown[], query: Record<string, unknown>): Record<string, unknown>[] {
@@ -663,6 +802,11 @@ function rowsToCsv(rows: Record<string, unknown>[]): string {
     "Phone number",
     "Whatsapp_status",
     "Whatsapp_message_sid",
+    "Twilio_status",
+    "Twilio_error_code",
+    "Twilio_error_message",
+    "Twilio_updated_at",
+    "Last_inbound_at",
     "Next_Follow_up",
     "assignedTo",
   ];
@@ -813,6 +957,58 @@ app.options("/api/n8n/sales-executions/:id", cors({
   origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
 }));
 
+async function listStoredSalesExecutions(take: number): Promise<Array<Record<string, unknown>>> {
+  const snap = await getDataProjectDb()
+    .collection("salesFunnelRuns")
+    .orderBy("createdAt", "desc")
+    .limit(take)
+    .get();
+  return snap.docs.map((doc) => {
+    const data = doc.data() || {};
+    return {
+      id: safeText(data.n8nExecutionId) || safeText(data.id) || doc.id,
+      startedAt: safeText(data.startedAt) || safeText(data.createdAt),
+      stoppedAt: safeText(data.stoppedAt) || undefined,
+      status: safeText(data.status) || (data.ok === false ? "error" : "success"),
+      mode: safeText(data.mode) || safeText(data.endpointMode) || "ui-trigger",
+      workflowId: SALES_FUNNEL_WORKFLOW_ID,
+      source: "firestore",
+      runId: safeText(data.id) || doc.id,
+    };
+  });
+}
+
+async function getStoredSalesExecution(id: string): Promise<Record<string, unknown> | null> {
+  const direct = await getDataProjectDb().collection("salesFunnelRuns").doc(id).get();
+  let snap = direct.exists ? direct : null;
+  if (!snap) {
+    const byN8n = await getDataProjectDb()
+      .collection("salesFunnelRuns")
+      .where("n8nExecutionId", "==", id)
+      .limit(1)
+      .get();
+    snap = byN8n.docs[0] || null;
+  }
+  if (!snap) return null;
+  const data = snap.data() || {};
+  return {
+    id: safeText(data.n8nExecutionId) || safeText(data.id) || snap.id,
+    finished: safeText(data.status).toLowerCase() !== "waiting",
+    status: safeText(data.status) || (data.ok === false ? "error" : "success"),
+    startedAt: safeText(data.startedAt) || safeText(data.createdAt),
+    stoppedAt: safeText(data.stoppedAt) || undefined,
+    workflowId: SALES_FUNNEL_WORKFLOW_ID,
+    mode: safeText(data.mode) || safeText(data.endpointMode) || "ui-trigger",
+    source: "firestore",
+    data: {
+      resultData: {
+        runData: {},
+      },
+    },
+    storedRun: data,
+  };
+}
+
 app.get("/api/n8n/sales-executions", requireRoles(SALES_N8N_ROLES), async (req, res) => {
   const { apiUrl, apiKey } = getN8nConfig();
   if (!apiUrl || !apiKey) {
@@ -838,6 +1034,24 @@ app.get("/api/n8n/sales-executions", requireRoles(SALES_N8N_ROLES), async (req, 
   try {
     const upstream = await fetch(url, { headers: { "X-N8N-API-KEY": apiKey } });
     const text = await upstream.text();
+    if (!upstream.ok) {
+      const fallback = await listStoredSalesExecutions(take);
+      logger.warn("n8n sales executions upstream failed; returning Firestore fallback", {
+        status: upstream.status,
+        fallbackCount: fallback.length,
+      });
+      await sendRateLimitedOpsAlert("n8n_sales_api_unavailable", {
+        type: "n8n.execution_api_unavailable",
+        severity: "warning",
+        message: "n8n sales executions API returned a non-OK response; Firestore fallback is active.",
+        details: { status: upstream.status, workflowId, fallbackCount: fallback.length },
+      });
+      return res.json({
+        data: fallback,
+        source: "firestore",
+        warning: "n8n execution API is unavailable; showing stored sales funnel runs.",
+      });
+    }
     res.status(upstream.status);
     res.setHeader("content-type", upstream.headers.get("content-type") ?? "application/json");
     try {
@@ -847,7 +1061,18 @@ app.get("/api/n8n/sales-executions", requireRoles(SALES_N8N_ROLES), async (req, 
     }
   } catch (err) {
     logger.error("n8n sales executions proxy failed", err);
-    return res.status(502).json({ message: "Failed to fetch sales executions from n8n." });
+    const fallback = await listStoredSalesExecutions(take);
+    await sendRateLimitedOpsAlert("n8n_sales_api_unreachable", {
+      type: "n8n.execution_api_unreachable",
+      severity: "warning",
+      message: "n8n sales executions API could not be reached; Firestore fallback is active.",
+      details: { workflowId, fallbackCount: fallback.length },
+    });
+    return res.json({
+      data: fallback,
+      source: "firestore",
+      warning: "n8n execution API is unreachable; showing stored sales funnel runs.",
+    });
   }
 });
 
@@ -873,6 +1098,14 @@ app.get("/api/n8n/sales-executions/:id", requireRoles(SALES_N8N_ROLES), async (r
       return res.send(text);
     }
     if (!upstream.ok) {
+      const fallback = await getStoredSalesExecution(id);
+      if (fallback) {
+        logger.warn("n8n sales execution detail upstream failed; returning Firestore fallback", {
+          status: upstream.status,
+          id,
+        });
+        return res.json(fallback);
+      }
       return res.status(upstream.status).json(data);
     }
     const workflowData = data.workflowData as { id?: string } | undefined;
@@ -885,6 +1118,8 @@ app.get("/api/n8n/sales-executions/:id", requireRoles(SALES_N8N_ROLES), async (r
     return res.status(upstream.status).json(data);
   } catch (err) {
     logger.error("n8n sales execution detail proxy failed", err);
+    const fallback = await getStoredSalesExecution(id);
+    if (fallback) return res.json(fallback);
     return res.status(502).json({ message: "Failed to fetch sales execution detail from n8n." });
   }
 });
@@ -922,6 +1157,9 @@ app.options("/api/ops/leads/:id/timeline", cors({
 app.options("/api/ops/assignments/:threadId", cors({
   origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
 }));
+app.options("/api/ops/audit", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
 
 app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
   const auth = getAuthedUser(req);
@@ -939,9 +1177,10 @@ app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
       db.collection(OPS_AUDIT_COLLECTION).orderBy("createdAt", "desc").limit(50).get(),
       db.collection("salesFunnelRuns").orderBy("createdAt", "desc").limit(100).get().catch(() => ({ docs: [] })),
     ]);
-    const statuses = statusSnap.docs.map((d) => d.data() || {});
+    const statuses = statusSnap.docs.map(docDataWithId);
     const outbound = outboundSnap.docs.map(docDataWithId);
     const inbound = inboundSnap.docs.map(docDataWithId);
+    const statusByPhone = bestTwilioStatusByPhone(statuses);
     const assignments = assignmentSnap.docs.map(docDataWithId);
     const today = new Date().toISOString().slice(0, 10);
     const deliveredToday = statuses.filter((s) => {
@@ -949,7 +1188,10 @@ app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
       return (st === "delivered" || st === "read") && safeText(s.updatedAt).startsWith(today);
     }).length;
     const readToday = statuses.filter((s) => safeText(s.status).toLowerCase() === "read" && safeText(s.updatedAt).startsWith(today)).length;
-    const failedWhatsApp = statuses.filter((s) => ["failed", "undelivered", "canceled"].includes(safeText(s.status).toLowerCase())).length;
+    const failedStatusRows = statuses
+      .filter((s) => ["failed", "undelivered", "canceled"].includes(safeText(s.status).toLowerCase()))
+      .sort((a, b) => parseMaybeDate(b.updatedAt) - parseMaybeDate(a.updatedAt));
+    const failedWhatsApp = failedStatusRows.length;
     const leadsByStatus: Record<string, number> = {};
     const campaignByCity: Record<string, Record<string, number>> = {};
     for (const lead of leadsResult.rows) {
@@ -967,7 +1209,9 @@ app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
       };
       bucket.scraped += 1;
       if (safeText(lead.Reply_Status) || safeText(lead.email_sent_at)) bucket.emailed += 1;
-      const wa = whatsappStatus(lead);
+      const phone = leadKeyFromPhone(lead["Phone number"] || lead.to_number);
+      const twilioStatus = statusByPhone.get(phone);
+      const wa = twilioStatus ? safeText(twilioStatus.status).toLowerCase() : whatsappStatus(lead);
       if (wa) bucket.whatsappSent += wa === "unknown" ? 0 : 1;
       if (wa === "delivered") bucket.delivered += 1;
       if (wa === "read") bucket.read += 1;
@@ -997,7 +1241,7 @@ app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
       leadsByStatus,
       campaignByCity,
       followUps: leadsResult.rows.filter(isOverdueFollowUp).slice(0, 25),
-      failedMessages: outbound.filter((d) => safeText(d.status) === "failed").slice(0, 25),
+      failedMessages: failedStatusRows.slice(0, 25),
       assignments,
       recentAudit: auditSnap.docs.map(docDataWithId),
       canReadLeadRows,
@@ -1008,6 +1252,33 @@ app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
   }
 });
 
+app.post("/api/ops/audit", requireRoles(OPS_ROLES), async (req, res) => {
+  const auth = getAuthedUser(req);
+  const action = safeText(req.body?.action);
+  if (!/^[a-z][a-z0-9_.-]{2,80}$/i.test(action)) {
+    return res.status(400).json({ message: "Invalid audit action." });
+  }
+  const targetIdRaw = safeText(req.body?.targetId);
+  const details = req.body?.details && typeof req.body.details === "object" && !Array.isArray(req.body.details)
+    ? req.body.details as Record<string, unknown>
+    : {};
+  await writeOpsAudit({
+    action,
+    auth,
+    targetId: targetIdRaw || null,
+    details,
+  });
+  if (action.includes("n8n") && safeText(details.status).toLowerCase() === "error") {
+    await sendRateLimitedOpsAlert("n8n_execution_errors", {
+      type: "n8n.execution_error",
+      severity: "warning",
+      message: "A sales funnel n8n launch or execution was reported as failed.",
+      details: { action, targetId: targetIdRaw || null, ...details },
+    });
+  }
+  return res.status(201).json({ ok: true });
+});
+
 app.get("/api/ops/export.csv", requireRoles(OPS_ROLES), async (req, res) => {
   const auth = getAuthedUser(req);
   if (!auth || !roleCanUseSheets(auth.role)) {
@@ -1015,12 +1286,29 @@ app.get("/api/ops/export.csv", requireRoles(OPS_ROLES), async (req, res) => {
   }
   try {
     const result = await fetchSheetLeadRows({ ...req.query, limit: "5000" } as Record<string, unknown>);
-    const assignmentsSnap = await getDataProjectDb().collection(LEAD_ASSIGNMENTS_COLLECTION).limit(1000).get();
+    const db = getDataProjectDb();
+    const [assignmentsSnap, statusesSnap, inboundSnap] = await Promise.all([
+      db.collection(LEAD_ASSIGNMENTS_COLLECTION).limit(1000).get(),
+      db.collection(TWILIO_STATUS_COLLECTION).limit(1000).get(),
+      db.collection(TWILIO_INBOUND_COLLECTION).orderBy("createdAt", "desc").limit(1000).get(),
+    ]);
     const assignments = new Map(assignmentsSnap.docs.map((doc) => [doc.id, doc.data() || {}]));
+    const statusByPhone = bestTwilioStatusByPhone(statusesSnap.docs.map(docDataWithId));
+    const latestInboundByPhone = inboundByPhone(inboundSnap.docs.map(docDataWithId));
     const rows = result.rows.map((row) => {
       const key = leadKeyFromPhone(row["Phone number"] || row.to_number);
       const assignment = assignments.get(key) || {};
-      return { ...row, assignedTo: assignment.assignedToEmail || assignment.assignedToName || "" };
+      const twilioStatus = statusByPhone.get(key) || {};
+      const inbound = latestInboundByPhone.get(key) || {};
+      return {
+        ...row,
+        Twilio_status: twilioStatus.status || row.Whatsapp_status || "",
+        Twilio_error_code: twilioStatus.errorCode || "",
+        Twilio_error_message: twilioStatus.errorMessage || "",
+        Twilio_updated_at: twilioStatus.updatedAt || "",
+        Last_inbound_at: inbound.createdAt || "",
+        assignedTo: assignment.assignedToEmail || assignment.assignedToName || "",
+      };
     });
     await writeOpsAudit({ action: "ops.export.csv", auth, details: { rows: rows.length } });
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -1076,6 +1364,7 @@ app.patch("/api/ops/assignments/:threadId", requireRoles(OPS_ROLES), async (req,
   const auth = getAuthedUser(req);
   const threadId = leadKeyFromPhone(req.params.threadId);
   const action = safeText(req.body?.action || "claim");
+  const notes = safeText(req.body?.notes).slice(0, 1000);
   const ref = getDataProjectDb().collection(LEAD_ASSIGNMENTS_COLLECTION).doc(threadId);
   const snap = await ref.get();
   const existing = snap.exists ? (snap.data() || {}) : null;
@@ -1083,8 +1372,8 @@ app.patch("/api/ops/assignments/:threadId", requireRoles(OPS_ROLES), async (req,
     if (existing?.assignedTo && existing.assignedTo !== auth?.uid && auth?.role !== "superadmin" && auth?.role !== "associate") {
       return res.status(409).json({ message: "Thread is assigned to another user.", assignment: existing });
     }
-    await ref.set({ assignedTo: null, assignedToEmail: null, assignedToName: null, unassignedAt: new Date().toISOString() }, { merge: true });
-    await writeOpsAudit({ action: "assignment.unclaim", auth, targetId: threadId });
+    await ref.set({ assignedTo: null, assignedToEmail: null, assignedToName: null, notes, unassignedAt: new Date().toISOString() }, { merge: true });
+    await writeOpsAudit({ action: "assignment.unclaim", auth, targetId: threadId, details: notes ? { notes } : {} });
     return res.json({ assignment: null });
   }
   if (existing?.assignedTo && existing.assignedTo !== auth?.uid) {
@@ -1095,6 +1384,7 @@ app.patch("/api/ops/assignments/:threadId", requireRoles(OPS_ROLES), async (req,
     assignedToEmail: auth?.email || null,
     assignedToName: auth?.email || auth?.uid || "Agent",
     assignedAt: new Date().toISOString(),
+    notes,
     threadId,
   };
   await ref.set(assignment, { merge: true });
@@ -1139,15 +1429,12 @@ app.get("/api/twilio/templates", requireRoles(TWILIO_ROLES), (_req, res) => {
   return res.json({
     templates: [
       {
-        sid: DEFAULT_WHATSAPP_DOCUMENT_TEMPLATE_SID,
-        name: DEFAULT_DOCUMENT_TEMPLATE_NAME,
+        sid: DEFAULT_WHATSAPP_QUICK_REPLY_TEMPLATE_SID,
+        name: DEFAULT_QUICK_REPLY_TEMPLATE_NAME,
         channel: "whatsapp",
-        mediaType: "document",
-        variables: {
-          "1": "mediaUrl",
-          "2": "filename",
-          "3": "caption",
-        },
+        mediaType: "text",
+        contentType: "twilio/quick-reply",
+        variables: {},
         isDefault: true,
       },
     ],
@@ -1167,6 +1454,41 @@ app.get("/api/twilio/send-diagnostics", requireRoles(TWILIO_ROLES), async (req, 
   } catch (err) {
     logger.error("Twilio diagnostics list failed", err);
     return res.status(502).json({ message: "Failed to load send diagnostics." });
+  }
+});
+
+app.get("/api/twilio/inbound", requireRoles(TWILIO_ROLES), async (req, res) => {
+  const takeRaw = Number.parseInt(String(req.query.limit || "100"), 10);
+  const take = Number.isFinite(takeRaw) ? Math.min(Math.max(takeRaw, 1), 200) : 100;
+  try {
+    const snap = await getDataProjectDb()
+      .collection(TWILIO_INBOUND_COLLECTION)
+      .orderBy("createdAt", "desc")
+      .limit(take)
+      .get();
+    const messages = snap.docs.map(docDataWithId).map((doc) => ({
+      sid: doc.sid || doc.id,
+      to: doc.to || null,
+      from: doc.from || null,
+      body: doc.body || "",
+      status: doc.status || "received",
+      direction: "inbound",
+      date_created: doc.createdAt || null,
+      date_sent: doc.createdAt || null,
+      date_updated: doc.createdAt || null,
+      media: Array.isArray(doc.media)
+        ? (doc.media as Array<Record<string, unknown>>).map((m) => ({
+            content_type: m.contentType || m.content_type || "",
+            media_url: m.url || m.media_url || "",
+            preview_url: m.url || m.preview_url || "",
+            filename: m.filename || "Attachment",
+          }))
+        : [],
+    }));
+    return res.json({ messages });
+  } catch (err) {
+    logger.error("Twilio inbound list failed", err);
+    return res.status(502).json({ message: "Failed to load inbound messages." });
   }
 });
 
@@ -1346,10 +1668,9 @@ app.post("/api/twilio/status", async (req, res) => {
   }
 
   const signature = req.get("x-twilio-signature") || undefined;
-  const callbackUrl = `${getPublicApiBase(req)}/api/twilio/status`;
-  if (!validateTwilioRequestSignature(t.authToken, signature, callbackUrl, params)) {
-    // Fallback: some Hosting setups strip/alter the public URL — try without query
-    logger.warn("Twilio status signature mismatch", { callbackUrl });
+  const callbackUrls = twilioSignatureUrlCandidates(req, "/api/twilio/status");
+  if (!validateTwilioRequestForAnyUrl(t.authToken, signature, callbackUrls, params)) {
+    logger.warn("Twilio status signature mismatch", { callbackUrl: callbackUrls[0] });
     return res.status(403).send("Invalid signature");
   }
 
@@ -1359,14 +1680,18 @@ app.post("/api/twilio/status", async (req, res) => {
   }
 
   try {
+    const status = params.MessageStatus || params.SmsStatus || "unknown";
     await upsertTwilioMessageStatus({
       sid,
       to: params.To,
       from: params.From,
-      status: params.MessageStatus || params.SmsStatus || "unknown",
+      status,
       errorCode: params.ErrorCode || null,
       errorMessage: params.ErrorMessage || null,
     });
+    if (isFailedTwilioStatus(status)) {
+      await maybeAlertTwilioFailureThreshold();
+    }
     return res.status(204).send();
   } catch (err) {
     logger.error("Twilio status callback write failed", err);
@@ -1388,9 +1713,9 @@ app.post("/api/twilio/inbound", async (req, res) => {
   }
 
   const signature = req.get("x-twilio-signature") || undefined;
-  const callbackUrl = `${getPublicApiBase(req)}/api/twilio/inbound`;
-  if (!validateTwilioRequestSignature(t.authToken, signature, callbackUrl, params)) {
-    logger.warn("Twilio inbound signature mismatch", { callbackUrl });
+  const callbackUrls = twilioSignatureUrlCandidates(req, "/api/twilio/inbound");
+  if (!validateTwilioRequestForAnyUrl(t.authToken, signature, callbackUrls, params)) {
+    logger.warn("Twilio inbound signature mismatch", { callbackUrl: callbackUrls[0] });
     return res.status(403).send("Invalid signature");
   }
 
@@ -1492,7 +1817,7 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
 
   const hasBody = Boolean(String(bodyText || "").trim());
   const hasMedia = Boolean(mediaUrl);
-  const templateSid = requestedTemplateSid || (hasMedia ? DEFAULT_WHATSAPP_DOCUMENT_TEMPLATE_SID : "");
+  const templateSid = requestedTemplateSid;
   let diagnosticId: string | null = null;
 
   if (!to || (!hasBody && !hasMedia)) {

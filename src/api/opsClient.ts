@@ -13,10 +13,16 @@ function getProxyBase(): string | null {
   return null;
 }
 
-async function authHeaders(extra?: HeadersInit): Promise<HeadersInit> {
-  const token = await getAuthIdToken();
+async function authHeaders(extra?: HeadersInit, forceRefresh = false): Promise<HeadersInit> {
+  const token = await getAuthIdToken(forceRefresh);
   if (!token) throw new Error('Not signed in. Please log in again.');
   return { ...(extra || {}), Authorization: `Bearer ${token}` };
+}
+
+async function fetchWithAuthRetry(url: string, init?: RequestInit): Promise<Response> {
+  const first = await fetch(url, { ...init, headers: await authHeaders(init?.headers) });
+  if (first.status !== 401) return first;
+  return fetch(url, { ...init, headers: await authHeaders(init?.headers, true) });
 }
 
 function opsUrl(path: string): string {
@@ -49,6 +55,7 @@ export type LeadAssignment = {
   assignedToEmail?: string | null;
   assignedToName?: string | null;
   assignedAt?: string;
+  notes?: string | null;
 };
 
 export type OpsAuditEvent = {
@@ -90,32 +97,28 @@ export type LeadTimeline = {
 };
 
 export async function fetchOpsDashboard(): Promise<OpsDashboard> {
-  const res = await fetch(opsUrl('/api/ops/dashboard'), { headers: await authHeaders() });
+  const res = await fetchWithAuthRetry(opsUrl('/api/ops/dashboard'));
   if (!res.ok) await parseError(res, 'Failed to load ops dashboard');
   return (await res.json()) as OpsDashboard;
 }
 
 export async function fetchLeadTimeline(leadId: string): Promise<LeadTimeline> {
-  const res = await fetch(opsUrl(`/api/ops/leads/${encodeURIComponent(leadId)}/timeline`), {
-    headers: await authHeaders(),
-  });
+  const res = await fetchWithAuthRetry(opsUrl(`/api/ops/leads/${encodeURIComponent(leadId)}/timeline`));
   if (!res.ok) await parseError(res, 'Failed to load lead timeline');
   return (await res.json()) as LeadTimeline;
 }
 
 export async function fetchLeadAssignment(threadId: string): Promise<LeadAssignment | null> {
-  const res = await fetch(opsUrl(`/api/ops/assignments/${encodeURIComponent(threadId)}`), {
-    headers: await authHeaders(),
-  });
+  const res = await fetchWithAuthRetry(opsUrl(`/api/ops/assignments/${encodeURIComponent(threadId)}`));
   if (!res.ok) await parseError(res, 'Failed to load assignment');
   const data = (await res.json()) as { assignment?: LeadAssignment | null };
   return data.assignment || null;
 }
 
 export async function updateLeadAssignment(threadId: string, action: 'claim' | 'unclaim'): Promise<LeadAssignment | null> {
-  const res = await fetch(opsUrl(`/api/ops/assignments/${encodeURIComponent(threadId)}`), {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/ops/assignments/${encodeURIComponent(threadId)}`), {
     method: 'PATCH',
-    headers: await authHeaders({ 'Content-Type': 'application/json' }),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action }),
   });
   if (!res.ok) await parseError(res, 'Failed to update assignment');
@@ -123,12 +126,25 @@ export async function updateLeadAssignment(threadId: string, action: 'claim' | '
   return data.assignment || null;
 }
 
+export async function writeOpsAuditEvent(input: {
+  action: string;
+  targetId?: string | null;
+  details?: Record<string, unknown>;
+}): Promise<void> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/ops/audit'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) await parseError(res, 'Failed to write audit event');
+}
+
 export function opsExportUrl(): string {
   return opsUrl('/api/ops/export.csv');
 }
 
 export async function downloadOpsCsv(): Promise<Blob> {
-  const res = await fetch(opsExportUrl(), { headers: await authHeaders() });
+  const res = await fetchWithAuthRetry(opsExportUrl());
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(text || 'Failed to export CSV');

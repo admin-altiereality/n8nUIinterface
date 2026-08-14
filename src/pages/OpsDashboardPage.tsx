@@ -192,9 +192,12 @@ export default function OpsDashboardPage() {
               <div key={String(item.id)} className="rounded-md bg-red-500/10 p-3 text-xs">
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate text-red-100">{String(item.to || 'Unknown recipient')}</span>
-                  <Badge variant="danger">{String(item.phase || 'failed')}</Badge>
+                  <Badge variant="danger">{String(item.status || item.phase || 'failed')}</Badge>
                 </div>
-                <p className="mt-1 text-[11px] text-red-200/80">{String(item.twilioMessage || item.mediaFilename || 'No message')}</p>
+                <p className="mt-1 text-[11px] text-red-200/80">
+                  {item.errorCode ? `Twilio ${String(item.errorCode)}` : String(item.twilioCode || item.twilioMessage || 'No error code')}
+                </p>
+                {item.updatedAt && <p className="mt-1 text-[10px] text-red-200/60">{shortDate(item.updatedAt)}</p>}
               </div>
             )) : <EmptyState text="No failed sends logged" />}
           </CardContent>

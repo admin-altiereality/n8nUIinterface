@@ -17,10 +17,16 @@ function getProxyBase(): string | null {
   return null;
 }
 
-async function authHeaders(): Promise<HeadersInit> {
-  const token = await getAuthIdToken();
+async function authHeaders(forceRefresh = false): Promise<HeadersInit> {
+  const token = await getAuthIdToken(forceRefresh);
   if (!token) throw new Error('Not signed in. Please log in again.');
   return { Authorization: `Bearer ${token}` };
+}
+
+async function fetchWithAuthRetry(url: string): Promise<Response> {
+  const first = await fetch(url, { headers: await authHeaders() });
+  if (first.status !== 401) return first;
+  return fetch(url, { headers: await authHeaders(true) });
 }
 
 export type SchoolLeadRow = Record<string, unknown> & {
@@ -75,7 +81,7 @@ export async function fetchSheetLeads(options: FetchLeadsOptions = {}): Promise<
   const qs = q.toString();
   const url = `${base}/api/sheets/leads${qs ? `?${qs}` : ''}`;
 
-  const res = await fetch(url, { headers: await authHeaders() });
+  const res = await fetchWithAuthRetry(url);
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { message?: string };
     throw new Error(data.message || `Failed to load leads (${res.status})`);

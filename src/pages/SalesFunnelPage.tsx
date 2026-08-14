@@ -34,6 +34,7 @@ import { getCurrentAuthUser, isFirebaseConfigured } from '../lib/firebase';
 import {
   canPollExecution,
   getSalesExecutionStatus,
+  lastSalesExecutionsMeta,
   listSalesExecutions,
   type N8nExecution,
   type N8nExecutionListItem,
@@ -43,6 +44,7 @@ import {
   leadPhoneForMessaging,
   type SchoolLeadRow,
 } from '../api/sheetsClient';
+import { writeOpsAuditEvent } from '../api/opsClient';
 import { OPS_DASHBOARD_ROADMAP } from '../lib/opsDashboardRoadmap';
 
 const storageKeys = {
@@ -199,6 +201,9 @@ export default function SalesFunnelPage() {
   const [pollingExecutionId, setPollingExecutionId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [recentN8n, setRecentN8n] = useState<N8nExecutionListItem[]>([]);
+  const [recentN8nLoading, setRecentN8nLoading] = useState(false);
+  const [recentN8nError, setRecentN8nError] = useState<string | null>(null);
+  const [recentN8nSource, setRecentN8nSource] = useState<'n8n' | 'firestore' | 'unknown'>('unknown');
   const [selectedN8nId, setSelectedN8nId] = useState<string | null>(null);
 
   const [leads, setLeads] = useState<SchoolLeadRow[]>([]);
@@ -263,9 +268,28 @@ export default function SalesFunnelPage() {
   };
 
   const refreshRecentN8n = useCallback(async () => {
-    if (!canPollExecution) return;
-    const list = await listSalesExecutions(15, SALES_WORKFLOW_ID);
-    if (list) setRecentN8n(list);
+    if (!canPollExecution) {
+      setRecentN8nError('Execution proxy is unavailable.');
+      return;
+    }
+    setRecentN8nLoading(true);
+    setRecentN8nError(null);
+    try {
+      const list = await listSalesExecutions(15, SALES_WORKFLOW_ID);
+      if (list) {
+        setRecentN8n(list);
+        setRecentN8nSource(lastSalesExecutionsMeta.source);
+        if (lastSalesExecutionsMeta.warning) {
+          setRecentN8nError(lastSalesExecutionsMeta.warning);
+        }
+      } else {
+        setRecentN8nError('Could not load recent n8n executions. Refresh sign-in or check role/API access.');
+      }
+    } catch (e) {
+      setRecentN8nError(e instanceof Error ? e.message : 'Could not load recent n8n executions.');
+    } finally {
+      setRecentN8nLoading(false);
+    }
   }, []);
 
   const loadLeads = useCallback(async () => {
@@ -473,6 +497,20 @@ export default function SalesFunnelPage() {
       time: new Date().toISOString(),
     };
     persistHistory([historyEntry, ...history]);
+
+    void writeOpsAuditEvent({
+      action: ok ? 'n8n.city_scrape.launch' : 'n8n.city_scrape.launch_failed',
+      targetId: payload.city,
+      details: {
+        city: payload.city,
+        queryPrefix: payload.queryPrefix,
+        query: payload.query,
+        status: ok ? runStatus : 'error',
+        responseStatus: statusCode || 'NETWORK_ERROR',
+        n8nExecutionId: n8nExecutionId || null,
+        endpointMode: mode,
+      },
+    }).catch((error) => console.warn('[sales-funnel] Failed to write ops audit event.', error));
 
     if (firebaseEnabled) {
       const authUser = getCurrentAuthUser();
@@ -752,9 +790,19 @@ export default function SalesFunnelPage() {
                 className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
                 title="Refresh"
               >
-                <RefreshCw className="w-3.5 h-3.5" />
+                <RefreshCw className={`w-3.5 h-3.5 ${recentN8nLoading ? 'animate-spin' : ''}`} />
               </button>
             </div>
+            {recentN8nError && (
+              <div className="mb-3 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+                {recentN8nError}
+              </div>
+            )}
+            {recentN8nSource === 'firestore' && (
+              <div className="mb-3 rounded-md border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-[11px] text-sky-200">
+                Showing stored sales runs while n8n API access is unavailable.
+              </div>
+            )}
             <div className="space-y-2 max-h-[220px] overflow-y-auto">
               {recentN8n.map((item) => (
                 <button
@@ -778,9 +826,9 @@ export default function SalesFunnelPage() {
                   </p>
                 </button>
               ))}
-              {!recentN8n.length && (
+              {!recentN8n.length && !recentN8nError && (
                 <p className="text-[11px] text-zinc-600 text-center py-4">
-                  {canPollExecution ? 'No recent executions' : 'Proxy unavailable'}
+                  {recentN8nLoading ? 'Loading executions...' : canPollExecution ? 'No recent executions' : 'Proxy unavailable'}
                 </p>
               )}
             </div>
