@@ -47,6 +47,30 @@ export type SchoolLeadRow = Record<string, unknown> & {
   Last_Follow_up?: string;
   Next_Follow_up?: string;
   XR_status?: string;
+  place_id?: string;
+  Email_template_id?: string;
+  Email_stage?: string;
+  Email_sent_at?: string;
+  Delivered_status?: string;
+  Opened_status?: string;
+  Bounced_status?: string;
+  Click_count?: string;
+  Last_Clicked_Button?: string;
+  Last_Clicked_Template?: string;
+  Last_Clicked_Stage?: string;
+  Last_Clicked_at?: string;
+  Clicked_HowLearnXR?: string;
+  Clicked_Website?: string;
+  Clicked_WhatsApp?: string;
+  Clicked_Demo?: string;
+  Clicked_Pricing?: string;
+  Suspected_bot_clicks?: string;
+  Reply_intent?: string;
+  Reply_confidence?: string;
+  Replied_at?: string;
+  Reply_snippet?: string;
+  Whatsapp_reminder_count?: string;
+  Whatsapp_reminder_at?: string;
 };
 
 export type FetchLeadsResult = {

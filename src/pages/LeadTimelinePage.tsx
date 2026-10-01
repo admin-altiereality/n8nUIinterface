@@ -130,12 +130,29 @@ export default function LeadTimelinePage() {
           <CardHeader><CardTitle>Email Reply</CardTitle></CardHeader>
           <CardContent>
             <Info label="Reply status" value={lead?.Reply_Status} />
+            <Info label="Reply intent" value={lead?.Reply_intent ? `${text(lead.Reply_intent)} (${text(lead?.Reply_confidence, '?')}%)` : undefined} />
             <Info label="WhatsApp replied" value={lead?.whatsapp_replied} />
             <Info label="Reply category" value={lead?.whatsapp_reply_category} />
             <Info label="Reply message" value={lead?.whatsapp_reply_message} />
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader><CardTitle>Email Engagement</CardTitle></CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <Info label="Template" value={lead?.Email_template_id} />
+            <Info label="Last stage sent" value={lead?.Email_stage} />
+            <Info label="Opened" value={lead?.Opened_status} />
+            <Info label="Clicks (real)" value={lead?.Click_count} />
+            <Info label="Last button" value={lead?.Last_Clicked_Button} />
+            <Info label="Clicked at" value={lead?.Last_Clicked_at ? shortDate(lead.Last_Clicked_at) : undefined} />
+            <Info label="Scanner clicks ignored" value={lead?.Suspected_bot_clicks} />
+            <Info label="Bounced" value={lead?.Bounced_status} />
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader><CardTitle>Timeline</CardTitle></CardHeader>

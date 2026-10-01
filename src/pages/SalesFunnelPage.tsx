@@ -45,6 +45,7 @@ import {
   type SchoolLeadRow,
 } from '../api/sheetsClient';
 import { writeOpsAuditEvent } from '../api/opsClient';
+import { SalesInsightsPanel } from '../components/sales/SalesInsightsPanel';
 import { OPS_DASHBOARD_ROADMAP } from '../lib/opsDashboardRoadmap';
 
 const storageKeys = {
@@ -78,6 +79,9 @@ const LEAD_COLUMNS = [
   'Lead_status',
   'Status',
   'Reply_Status',
+  'Email_template_id',
+  'Click_count',
+  'Last_Clicked_Button',
   'Whatsapp_status',
   'whatsapp_sent_at',
   'Follow_up_count',
@@ -300,7 +304,7 @@ export default function SalesFunnelPage() {
         q: leadQuery.trim() || undefined,
         city: leadCity.trim() || undefined,
         leadStatus: leadStatusFilter.trim() || undefined,
-        limit: 500,
+        limit: 2000,
       });
       setLeads(result.rows);
       setLeadsFetchedAt(result.fetchedAt);
@@ -864,6 +868,8 @@ export default function SalesFunnelPage() {
         </div>
       </div>
 
+      <SalesInsightsPanel leads={leads} onSelectLead={setSelectedLead} />
+
       {/* Leads from Google Sheets */}
       <div className="surface-card p-5 mt-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
@@ -1016,7 +1022,22 @@ export default function SalesFunnelPage() {
                 'Last_Follow_up',
                 'Next_Follow_up',
                 'XR_status',
-                'Thread ID',
+                'Email_template_id',
+                'Email_stage',
+                'Email_sent_at',
+                'Delivered_status',
+                'Opened_status',
+                'Click_count',
+                'Last_Clicked_Button',
+                'Last_Clicked_Template',
+                'Last_Clicked_Stage',
+                'Last_Clicked_at',
+                'Suspected_bot_clicks',
+                'Bounced_status',
+                'Reply_intent',
+                'Reply_confidence',
+                'Reply_snippet',
+                'Whatsapp_reminder_at',
               ].map((key) => (
                 <div key={key} className="flex gap-3 border-b border-zinc-800/80 pb-1.5">
                   <dt className="w-40 flex-shrink-0 text-zinc-500">{key}</dt>
