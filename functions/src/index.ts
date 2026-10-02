@@ -599,6 +599,64 @@ function validateTwilioRequestForAnyUrl(
   return urls.some((url) => validateTwilioRequestSignature(authToken, signature, url, params));
 }
 
+/**
+ * Twilio signs webhooks with the account's primary auth token, so a stored secondary token never
+ * matches. In that case ask Twilio's API for the message by SID and keep only what Twilio returns:
+ * a forged request can't produce a real message SID from this account.
+ */
+async function verifyTwilioWebhook(
+  req: express.Request,
+  t: { accountSid: string; authToken: string },
+  path: string,
+  params: Record<string, string>
+): Promise<Record<string, string> | null> {
+  const signature = req.get("x-twilio-signature") || undefined;
+  if (validateTwilioRequestForAnyUrl(t.authToken, signature, twilioSignatureUrlCandidates(req, path), params)) {
+    return params;
+  }
+  const sid = params.MessageSid || params.SmsSid || "";
+  if (!isValidTwilioMessageSid(sid)) return null;
+  try {
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(t.accountSid)}/Messages/${encodeURIComponent(sid)}.json`;
+    const apiRes = await fetch(url, { headers: { Authorization: twilioBasicAuthHeader(t.accountSid, t.authToken) } });
+    if (!apiRes.ok) return null;
+    const msg = (await apiRes.json()) as Record<string, unknown>;
+    logger.info("Twilio webhook verified by API lookup (signature mismatch)", { path });
+    return {
+      ...params,
+      MessageSid: sid,
+      From: String(msg.from ?? ""),
+      To: String(msg.to ?? ""),
+      Body: String(msg.body ?? ""),
+      MessageStatus: String(msg.status ?? ""),
+      ErrorCode: msg.error_code == null ? "" : String(msg.error_code),
+      ErrorMessage: msg.error_message == null ? "" : String(msg.error_message),
+      NumMedia: String(msg.num_media ?? "0"),
+    };
+  } catch (err) {
+    logger.warn("Twilio webhook API verification failed", err);
+    return null;
+  }
+}
+
+const WHATSAPP_STOP = /^\s*(stop|stopall|unsubscribe|opt[\s-]?out|cancel|end|quit|band\s*karo)\s*[.!]*\s*$/i;
+const WHATSAPP_START = /^\s*(start|unstop|subscribe)\s*[.!]*\s*$/i;
+const WHATSAPP_OPT_OUTS_COLLECTION = "whatsappOptOuts";
+
+/** Hands a sales event to n8n ("Sales • Events"); never blocks the caller for more than 3 seconds. */
+async function forwardSalesEvent(event: Record<string, unknown>): Promise<void> {
+  try {
+    const { status } = await callN8nWebhook("sales-events", {
+      method: "POST",
+      body: { ...event, at: new Date().toISOString() },
+      timeoutMs: 3_000,
+    });
+    if (status >= 400) logger.warn("sales event rejected by n8n", { type: event.type, status });
+  } catch (err) {
+    logger.warn("sales event forward failed", { type: event.type, error: String(err) });
+  }
+}
+
 function shouldAdvanceTwilioStatus(prev: string | undefined, next: string): boolean {
   const n = String(next || "").toLowerCase();
   if (!n) return false;
@@ -1780,20 +1838,18 @@ app.post("/api/twilio/status", async (req, res) => {
   }
 
   const body = (req.body || {}) as Record<string, unknown>;
-  const params: Record<string, string> = {};
+  const rawParams: Record<string, string> = {};
   for (const [k, v] of Object.entries(body)) {
     if (v == null) continue;
-    params[k] = String(v);
+    rawParams[k] = String(v);
   }
 
-  const signature = req.get("x-twilio-signature") || undefined;
-  const callbackUrls = twilioSignatureUrlCandidates(req, "/api/twilio/status");
-  if (!validateTwilioRequestForAnyUrl(t.authToken, signature, callbackUrls, params)) {
+  const params = await verifyTwilioWebhook(req, t, "/api/twilio/status", rawParams);
+  if (!params) {
     logger.warn("Twilio status signature mismatch", {
       host: req.get("host"),
       forwardedHost: req.get("x-forwarded-host"),
       originalUrl: req.originalUrl,
-      tried: callbackUrls.length,
     });
     return res.status(403).send("Invalid signature");
   }
@@ -1830,20 +1886,18 @@ app.post("/api/twilio/inbound", async (req, res) => {
   }
 
   const body = (req.body || {}) as Record<string, unknown>;
-  const params: Record<string, string> = {};
+  const rawParams: Record<string, string> = {};
   for (const [k, v] of Object.entries(body)) {
     if (v == null) continue;
-    params[k] = String(v);
+    rawParams[k] = String(v);
   }
 
-  const signature = req.get("x-twilio-signature") || undefined;
-  const callbackUrls = twilioSignatureUrlCandidates(req, "/api/twilio/inbound");
-  if (!validateTwilioRequestForAnyUrl(t.authToken, signature, callbackUrls, params)) {
+  const params = await verifyTwilioWebhook(req, t, "/api/twilio/inbound", rawParams);
+  if (!params) {
     logger.warn("Twilio inbound signature mismatch", {
       host: req.get("host"),
       forwardedHost: req.get("x-forwarded-host"),
       originalUrl: req.originalUrl,
-      tried: callbackUrls.length,
     });
     return res.status(403).send("Invalid signature");
   }
@@ -1884,6 +1938,17 @@ app.post("/api/twilio/inbound", async (req, res) => {
       errorMessage: params.ErrorMessage || null,
     });
     await writeOpsAudit({ action: "twilio.inbound.persisted", targetId: threadId, details: { sid } });
+
+    const text = params.Body || "";
+    const optOuts = getDataProjectDb().collection(WHATSAPP_OPT_OUTS_COLLECTION);
+    if (WHATSAPP_STOP.test(text)) {
+      await optOuts.doc(threadId).set({ phone: threadId, keyword: text.trim(), at: new Date().toISOString() });
+      await forwardSalesEvent({ type: "whatsapp_optout", phone: threadId, keyword: text.trim(), sid });
+    } else {
+      if (WHATSAPP_START.test(text)) await optOuts.doc(threadId).delete();
+      await forwardSalesEvent({ type: "whatsapp_reply", phone: threadId, body: text, sid, profileName: params.ProfileName || "" });
+    }
+
     res.setHeader("Content-Type", "text/xml");
     return res.status(200).send("<Response></Response>");
   } catch (err) {
@@ -1985,6 +2050,10 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
       phase: "validation",
       diagnosticId,
     });
+  }
+  const optOut = await getDataProjectDb().collection(WHATSAPP_OPT_OUTS_COLLECTION).doc(leadKeyFromPhone(to)).get();
+  if (optOut.exists) {
+    return res.status(409).json({ message: "This number replied STOP, so WhatsApp messages to it are blocked.", phase: "validation" });
   }
   if (hasMedia && !isAllowedMediaUrl(mediaUrl)) {
     diagnosticId = await writeTwilioDiagnostic({
