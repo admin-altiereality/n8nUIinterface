@@ -124,5 +124,9 @@ export function leadPhoneForMessaging(row: SchoolLeadRow): string | null {
   if (!raw) return null;
   const digits = raw.replace(/[^\d+]/g, '');
   if (!digits) return null;
-  return digits.startsWith('+') ? digits : digits.length === 10 ? `+91${digits}` : `+${digits}`;
+  if (digits.startsWith('+')) return digits;
+  if (digits.length === 10) return `+91${digits}`;
+  // Google Places often stores Indian numbers in national format (0 + 10 digits).
+  if (digits.length === 11 && digits.startsWith('0')) return `+91${digits.slice(1)}`;
+  return `+${digits}`;
 }

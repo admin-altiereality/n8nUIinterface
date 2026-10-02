@@ -13,6 +13,10 @@
         "function": "api"
       },
       {
+        "source": "/u/**",
+        "function": "api"
+      },
+      {
         "source": "/**",
         "destination": "/index.html"
       }

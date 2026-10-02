@@ -34,8 +34,8 @@ function opsUrl(path: string): string {
 }
 
 async function parseError(res: Response, fallback: string): Promise<never> {
-  const data = (await res.json().catch(() => ({}))) as { message?: string };
-  throw new Error(data.message || fallback);
+  const data = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
+  throw new Error(data.message || data.error || fallback);
 }
 
 export type OpsKpis = {
@@ -137,6 +137,19 @@ export async function writeOpsAuditEvent(input: {
     body: JSON.stringify(input),
   });
   if (!res.ok) await parseError(res, 'Failed to write audit event');
+}
+
+export type CityRunPreset = 'cbse' | 'icse' | 'ib' | 'international' | 'all';
+
+/** Starts a city scrape through the backend, which calls n8n with the shared webhook key. */
+export async function startCityRun(city: string, preset: CityRunPreset): Promise<{ executionId: string | null; city: string }> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/sales/city-runs'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ city, preset }),
+  });
+  if (!res.ok) await parseError(res, 'Failed to start the city run');
+  return (await res.json()) as { executionId: string | null; city: string };
 }
 
 export function opsExportUrl(): string {

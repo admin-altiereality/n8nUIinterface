@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
+import { Select } from '../components/ui/select';
 import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
 import { PageHeader } from '../components/layout/PageHeader';
@@ -44,24 +45,25 @@ import {
   leadPhoneForMessaging,
   type SchoolLeadRow,
 } from '../api/sheetsClient';
-import { writeOpsAuditEvent } from '../api/opsClient';
+import { startCityRun, type CityRunPreset } from '../api/opsClient';
 import { SalesInsightsPanel } from '../components/sales/SalesInsightsPanel';
 import { OPS_DASHBOARD_ROADMAP } from '../lib/opsDashboardRoadmap';
 
 const storageKeys = {
-  webhookUrl: 'sales_funnel_webhook_url',
   history: 'sales_funnel_history',
-  endpointMode: 'sales_funnel_endpoint_mode',
   logs: 'sales_funnel_logs',
   executions: 'sales_funnel_n8n_executions',
   latestResultText: 'sales_funnel_latest_result_text',
 } as const;
 
-const endpointUrls = {
-  test: import.meta.env.VITE_N8N_SALES_FUNNEL_URL || 'https://n8n.altiereality.com/webhook/city-scrape-start',
-  production:
-    import.meta.env.VITE_N8N_SALES_FUNNEL_URL || 'https://n8n.altiereality.com/webhook/city-scrape-start',
-};
+/** Search presets the backend maps to Google Places queries ("CBSE schools in <city>", ...). */
+const CITY_RUN_PRESETS: Array<{ value: CityRunPreset; label: string }> = [
+  { value: 'cbse', label: 'CBSE schools' },
+  { value: 'icse', label: 'ICSE schools' },
+  { value: 'ib', label: 'IB schools' },
+  { value: 'international', label: 'International schools' },
+  { value: 'all', label: 'All schools' },
+];
 
 const SALES_WORKFLOW_ID =
   (import.meta.env.VITE_N8N_SALES_WORKFLOW_ID as string | undefined) || 'sLk0CAalsSlR5z4P';
@@ -73,7 +75,6 @@ const MAX_WATCH_MS = 20 * 60 * 1000;
 const RESUME_MAX_AGE_MS = 30 * 60 * 1000;
 const LEAD_SEARCH_COLUMNS = ['School Name', 'Email ID', 'City', 'Phone number', 'Lead_status', 'Whatsapp_status'];
 
-type Mode = 'test' | 'production' | 'custom';
 type HeaderStatus = { text: string; kind: '' | 'ok' | 'warn' };
 
 const LEAD_COLUMNS = [
@@ -104,20 +105,6 @@ function readJsonStorage<T>(key: string, fallback: T): T {
 
 function makeId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function readMode(): Mode {
-  return (localStorage.getItem(storageKeys.endpointMode) as Mode) || 'production';
-}
-
-function readUrl(mode: Mode): string {
-  const storedUrl = localStorage.getItem(storageKeys.webhookUrl);
-  if (storedUrl?.includes('webhook-test')) {
-    localStorage.removeItem(storageKeys.webhookUrl);
-    return endpointUrls.production;
-  }
-  if (mode === 'test' || mode === 'production') return endpointUrls[mode];
-  return storedUrl || endpointUrls.production;
 }
 
 function mapRunDataToNodes(exec: N8nExecution): SalesFunnelExecutionNode[] {
@@ -167,21 +154,6 @@ function mapRunDataToNodes(exec: N8nExecution): SalesFunnelExecutionNode[] {
   });
 }
 
-function parseExecutionId(bodyText: string): string | undefined {
-  try {
-    const data = JSON.parse(bodyText) as Record<string, unknown>;
-    if (typeof data.executionId === 'string') return data.executionId;
-    if (typeof data.execution_id === 'string') return data.execution_id;
-    if (data.data && typeof data.data === 'object') {
-      const inner = data.data as Record<string, unknown>;
-      if (typeof inner.executionId === 'string') return inner.executionId;
-    }
-  } catch {
-    // ignore
-  }
-  return undefined;
-}
-
 function cell(row: SchoolLeadRow, key: string): string {
   const v = row[key];
   if (v == null) return '';
@@ -189,10 +161,8 @@ function cell(row: SchoolLeadRow, key: string): string {
 }
 
 export default function SalesFunnelPage() {
-  const [mode] = useState<Mode>(() => readMode());
-  const [webhookUrl] = useState<string>(() => readUrl(readMode()));
   const [city, setCity] = useState<string>('');
-  const [queryPrefix, setQueryPrefix] = useState<string>('CBSE schools in');
+  const [preset, setPreset] = useState<CityRunPreset>('cbse');
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [resultText, setResultText] = useState<string>(
     () => localStorage.getItem(storageKeys.latestResultText) || 'No submission yet.'
@@ -271,7 +241,7 @@ export default function SalesFunnelPage() {
 
   const onReset = () => {
     setCity('');
-    setQueryPrefix('CBSE schools in');
+    setPreset('cbse');
     setResultText('Form reset.');
     setStatus({ text: 'Ready', kind: '' });
   };
@@ -477,18 +447,13 @@ export default function SalesFunnelPage() {
     setSubmitting(true);
     setStatus({ text: 'Submitting', kind: '' });
 
-    const payload: { city: string; queryPrefix: string; startedAt: string; query?: string } = {
+    const presetLabel = CITY_RUN_PRESETS.find((p) => p.value === preset)?.label || preset;
+    const payload = {
       city: city.trim(),
-      queryPrefix: queryPrefix.trim() || 'CBSE schools in',
+      queryPrefix: `${presetLabel} in`,
+      query: `${presetLabel} in ${city.trim()}`,
       startedAt: new Date().toISOString(),
     };
-    payload.query = `${payload.queryPrefix} ${payload.city}`.trim();
-
-    const requestUrl = new URL(webhookUrl);
-    requestUrl.searchParams.set('city', payload.city);
-    requestUrl.searchParams.set('queryPrefix', payload.queryPrefix);
-    requestUrl.searchParams.set('query', payload.query);
-    requestUrl.searchParams.set('startedAt', payload.startedAt);
 
     const logEntriesForStorage: SalesFunnelLogEntry[] = [];
     const pushLog = (type: string, message: string) => {
@@ -497,21 +462,20 @@ export default function SalesFunnelPage() {
       persistLogs([entry, ...logs].slice(0, 200));
     };
 
-    pushLog('request', `GET ${requestUrl.toString()}`);
-    setResultText(`Sending GET request to:\n${requestUrl.toString()}`);
+    pushLog('request', `Start ${payload.query}`);
+    setResultText(`Starting: ${payload.query}`);
 
     let ok = false;
     let bodyText = '';
-    let statusCode = 0;
     let n8nExecutionId: string | undefined;
 
     try {
-      const response = await fetch(requestUrl.toString(), { method: 'GET' });
-      statusCode = response.status;
-      bodyText = await response.text();
-      ok = response.ok;
-      n8nExecutionId = parseExecutionId(bodyText);
-      pushLog('response', `Status ${statusCode}: ${bodyText || '(No response body)'}`);
+      // The backend launches the n8n run with the shared webhook key (no public n8n URL in the browser).
+      const result = await startCityRun(payload.city, preset);
+      ok = true;
+      n8nExecutionId = result.executionId || undefined;
+      bodyText = n8nExecutionId ? `Started · n8n execution ${n8nExecutionId}` : 'Started';
+      pushLog('response', bodyText);
     } catch (errorObj) {
       bodyText = errorObj instanceof Error ? errorObj.message : 'Unknown error';
       pushLog('error', bodyText);
@@ -519,9 +483,7 @@ export default function SalesFunnelPage() {
       setSubmitting(false);
     }
 
-    const formattedResultText =
-      `Status: ${statusCode || 'NETWORK_ERROR'}\nEndpoint: ${requestUrl.toString()}\n\n` +
-      `${bodyText || '(No response body)'}`;
+    const formattedResultText = `${payload.query}\n\n${bodyText}`;
     setResultText(formattedResultText);
     localStorage.setItem(storageKeys.latestResultText, formattedResultText);
 
@@ -551,25 +513,11 @@ export default function SalesFunnelPage() {
     const historyEntry: SalesFunnelHistoryItem = {
       city: payload.city,
       queryPrefix: payload.queryPrefix,
-      query: payload.query!,
+      query: payload.query,
       ok,
       time: new Date().toISOString(),
     };
     persistHistory([historyEntry, ...history]);
-
-    void writeOpsAuditEvent({
-      action: ok ? 'n8n.city_scrape.launch' : 'n8n.city_scrape.launch_failed',
-      targetId: payload.city,
-      details: {
-        city: payload.city,
-        queryPrefix: payload.queryPrefix,
-        query: payload.query,
-        status: ok ? runStatus : 'error',
-        responseStatus: statusCode || 'NETWORK_ERROR',
-        n8nExecutionId: n8nExecutionId || null,
-        endpointMode: mode,
-      },
-    }).catch((error) => console.warn('[sales-funnel] Failed to write ops audit event.', error));
 
     if (firebaseEnabled) {
       const authUser = getCurrentAuthUser();
@@ -579,14 +527,14 @@ export default function SalesFunnelPage() {
           userId: authUser.uid,
           city: payload.city,
           queryPrefix: payload.queryPrefix,
-          query: payload.query!,
+          query: payload.query,
           startedAt: payload.startedAt,
           stoppedAt: localExecution.stoppedAt || new Date().toISOString(),
           ok,
-          endpointMode: mode,
-          webhookUrl,
-          requestUrl: requestUrl.toString(),
-          responseStatus: statusCode,
+          endpointMode: 'api',
+          webhookUrl: '/api/sales/city-runs',
+          requestUrl: '/api/sales/city-runs',
+          responseStatus: ok ? 202 : 0,
           responseBody: bodyText,
           nodes,
           logEntries: logEntriesForStorage,
@@ -710,20 +658,22 @@ export default function SalesFunnelPage() {
           <form onSubmit={onSubmit} noValidate className="space-y-5">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label>Target Region</Label>
+                <Label>City</Label>
                 <Input
                   value={city}
                   onChange={(e) => setCity(e.target.value)}
-                  placeholder="e.g. New York, Mumbai"
+                  placeholder="e.g. Jaipur"
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>Business Niche</Label>
-                <Input
-                  value={queryPrefix}
-                  onChange={(e) => setQueryPrefix(e.target.value)}
-                  placeholder="e.g. Dental Clinics"
-                />
+                <Label>Schools to find</Label>
+                <Select value={preset} onChange={(e) => setPreset(e.target.value as CityRunPreset)}>
+                  {CITY_RUN_PRESETS.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </Select>
               </div>
             </div>
             <div className="flex gap-2">

@@ -26,6 +26,8 @@ type AuthedUser = {
 
 const n8nApiUrlSecret = defineSecret("N8N_API_URL_SECRET");
 const n8nApiKeySecret = defineSecret("N8N_API_KEY_SECRET");
+/** Shared with n8n's "Altie Function Key" Header Auth credential; sent as X-Altie-Key. */
+const n8nWebhookSecret = defineSecret("N8N_WEBHOOK_SECRET");
 
 const twilioAccountSidSecret = defineSecret("TWILIO_ACCOUNT_SID");
 const twilioAuthTokenSecret = defineSecret("TWILIO_AUTH_TOKEN");
@@ -53,9 +55,36 @@ const OPS_ROLES = new Set(["superadmin", "associate", "salesperson", "whatsapp_m
 
 const SALES_FUNNEL_WORKFLOW_ID =
   process.env.N8N_SALES_WORKFLOW_ID || "sLk0CAalsSlR5z4P";
-const SHEETS_LEADS_WEBHOOK_URL =
-  process.env.N8N_SHEETS_LEADS_WEBHOOK_URL ||
-  "https://n8n.altiereality.com/webhook/sheet-leads-read";
+const N8N_WEBHOOK_BASE = (process.env.N8N_WEBHOOK_BASE || "https://n8n.altiereality.com/webhook").replace(/\/$/, "");
+const SHEET_CACHE_MS = 60_000;
+
+const LEAD_ID_PATTERN = /^lx[0-9a-z]+(-\d+)?$/;
+const LEAD_STAGES = new Set(["New", "Contacted", "Engaged", "Demo booked", "Demo done", "Proposal", "Won", "Lost"]);
+const LOST_REASONS = new Set([
+  "Not interested",
+  "No budget",
+  "Chose another vendor",
+  "No response",
+  "Wrong contact",
+  "Unsubscribed",
+  "Duplicate",
+  "Other",
+]);
+/** Stage → milestone column stamped when a lead enters that stage (n8n keeps the first value). */
+const STAGE_MILESTONE: Record<string, string> = {
+  "Demo booked": "Demo_booked_at",
+  "Demo done": "Demo_done_at",
+  Proposal: "Proposal_sent_at",
+  Won: "Won_at",
+  Lost: "Lost_at",
+};
+const CITY_RUN_PRESETS: Record<string, string> = {
+  cbse: "CBSE schools in",
+  icse: "ICSE schools in",
+  ib: "IB schools in",
+  international: "International schools in",
+  all: "Schools in",
+};
 
 const TWILIO_STATUS_COLLECTION = "twilioMessageStatus";
 const TWILIO_OUTBOUND_LOGS_COLLECTION = "twilioOutboundLogs";
@@ -149,6 +178,33 @@ function getN8nConfig(): N8nProxyConfig {
     apiUrl: n8nApiUrlSecret.value(),
     apiKey: n8nApiKeySecret.value(),
   };
+}
+
+/** Calls an n8n webhook with the X-Altie-Key header that n8n's Header Auth checks. */
+async function callN8nWebhook(
+  path: string,
+  init: { method?: "GET" | "POST"; query?: Record<string, string>; body?: unknown; timeoutMs?: number } = {}
+): Promise<{ status: number; data: unknown }> {
+  const url = new URL(`${N8N_WEBHOOK_BASE}/${path}`);
+  for (const [key, value] of Object.entries(init.query || {})) url.searchParams.set(key, value);
+  const upstream = await fetch(url.toString(), {
+    method: init.method || "GET",
+    headers: {
+      Accept: "application/json",
+      "X-Altie-Key": n8nWebhookSecret.value(),
+      ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: AbortSignal.timeout(init.timeoutMs || 30_000),
+  });
+  const text = await upstream.text();
+  let data: unknown = text;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    // keep the raw text
+  }
+  return { status: upstream.status, data };
 }
 
 function twilioBasicAuthHeader(accountSid: string, authToken: string): string {
@@ -337,9 +393,14 @@ function normalizeWhatsAppAddress(value: unknown): string {
 }
 
 function leadKeyFromPhone(value: unknown): string {
-  const normalized = normalizeWhatsAppAddress(value).replace(/[^\d+]/g, "");
-  if (!normalized) return "unknown";
-  return normalized.startsWith("+") ? normalized : `+${normalized}`;
+  const raw = normalizeWhatsAppAddress(value);
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return "unknown";
+  if (raw.startsWith("+")) return `+${digits}`;
+  // Sheet numbers are usually bare Indian mobiles, while Twilio always uses +91.
+  if (/^[6-9]\d{9}$/.test(digits)) return `+91${digits}`;
+  if (/^0[6-9]\d{9}$/.test(digits)) return `+91${digits.slice(1)}`;
+  return `+${digits}`;
 }
 
 function roleCanUseSheets(role: string): boolean {
@@ -378,17 +439,19 @@ async function sendOpsAlert(input: {
   message: string;
   details?: Record<string, unknown>;
 }): Promise<void> {
-  const webhookUrl = process.env.OPS_ALERT_EMAIL_WEBHOOK_URL || "";
-  if (!webhookUrl) return;
+  const webhookUrl = process.env.OPS_ALERT_EMAIL_WEBHOOK_URL || `${N8N_WEBHOOK_BASE}/sales-alert`;
   try {
     await fetch(webhookUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Altie-Key": n8nWebhookSecret.value() },
       body: JSON.stringify({
         ...input,
+        title: `${input.severity}: ${input.type}`,
+        detail: `${input.message}\n${JSON.stringify(input.details || {}, null, 2)}`,
         source: "learnxr-agents-api",
         createdAt: new Date().toISOString(),
       }),
+      signal: AbortSignal.timeout(10_000),
     });
     await writeOpsAudit({ action: "alert.sent", details: { type: input.type, severity: input.severity } });
   } catch (err) {
@@ -496,10 +559,14 @@ function validateTwilioRequestSignature(
 
 function twilioSignatureUrlCandidates(req: express.Request, path: string): string[] {
   const base = getPublicApiBase(req).replace(/\/$/, "");
-  const originalPath = (req.originalUrl || req.url || path).split("?")[0] || path;
+  const fullOriginal = req.originalUrl || req.url || path;
+  const originalPath = fullOriginal.split("?")[0] || path;
   const host = (req.get("host") || "").split(",")[0]!.trim();
   const forwardedProto = (req.get("x-forwarded-proto") || "https").split(",")[0]!.trim();
   const candidates = new Set<string>([
+    // Twilio signs the full URL including any query string.
+    `${base}${fullOriginal}`,
+    `https://agents.altiereality.com${fullOriginal}`,
     `${base}${path}`,
     `${base}${originalPath}`,
     `https://agents-altiereality-com.web.app${path}`,
@@ -675,48 +742,143 @@ function filterLeadRows(rows: unknown[], query: Record<string, unknown>): Record
   });
 }
 
+// Per-instance cache of the whole sheet; pages and the dashboard re-read it constantly.
+let sheetCache: { at: number; rows: unknown[] } | null = null;
+
 async function fetchSheetLeadRows(query: Record<string, unknown> = {}): Promise<{
   fetchedAt: string;
   rows: Record<string, unknown>[];
 }> {
-  const webhookUrl = SHEETS_LEADS_WEBHOOK_URL;
-  if (!webhookUrl) {
-    throw new Error("Sheets leads webhook is not configured.");
+  const fresh = query.fresh === "1" || query.fresh === true;
+  if (!sheetCache || fresh || Date.now() - sheetCache.at > SHEET_CACHE_MS) {
+    const { status, data } = await callN8nWebhook("sheet-leads-read");
+    if (typeof data === "string") {
+      throw new Error(`Unexpected sheets webhook response: ${data.slice(0, 120)}`);
+    }
+    if (status >= 400) {
+      const message =
+        data && typeof data === "object" && typeof (data as Record<string, unknown>).message === "string"
+          ? String((data as Record<string, unknown>).message)
+          : "Sheets leads fetch failed";
+      throw new Error(message);
+    }
+    let rows: unknown[] = [];
+    if (Array.isArray(data)) rows = data;
+    else if (data && typeof data === "object") {
+      const obj = data as Record<string, unknown>;
+      if (Array.isArray(obj.rows)) rows = obj.rows;
+      else if (Array.isArray(obj.data)) rows = obj.data;
+      else if (Array.isArray(obj.leads)) rows = obj.leads;
+    }
+    sheetCache = { at: Date.now(), rows };
   }
-  const url = new URL(webhookUrl);
-  for (const key of ["city", "status", "leadStatus", "whatsappStatus", "q", "limit"] as const) {
-    const val = query[key];
-    if (typeof val === "string" && val.trim()) url.searchParams.set(key, val.trim());
+  return { fetchedAt: new Date(sheetCache.at).toISOString(), rows: filterLeadRows(sheetCache.rows, query) };
+}
+
+type LeadPatchResult =
+  | { fields: Record<string, string>; ifOwnerIn?: string[] }
+  | { error: string; field?: string };
+
+const STAFF_EDIT_ROLES = new Set(["superadmin", "associate"]);
+
+function isIsoDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(value));
+}
+
+/** Validates the whitelisted fields a rep may change and adds the server-owned ones. */
+function buildLeadPatch(body: Record<string, unknown>, auth: AuthedUser): LeadPatchResult {
+  const input = (body.fields && typeof body.fields === "object" ? body.fields : {}) as Record<string, unknown>;
+  const now = new Date().toISOString();
+  const fields: Record<string, string> = {};
+  let ifOwnerIn: string[] | undefined;
+  const me = (auth.email || "").toLowerCase();
+  const canEditOthers = STAFF_EDIT_ROLES.has(auth.role) && body.force === true;
+
+  for (const [key, raw] of Object.entries(input)) {
+    const value = safeText(raw);
+    switch (key) {
+      case "Stage": {
+        if (!LEAD_STAGES.has(value)) return { error: "invalid_stage", field: key };
+        fields.Stage = value;
+        if (STAGE_MILESTONE[value]) fields[STAGE_MILESTONE[value]] = now;
+        break;
+      }
+      case "Lost_reason":
+        if (value && !LOST_REASONS.has(value)) return { error: "invalid_lost_reason", field: key };
+        fields.Lost_reason = value;
+        break;
+      case "Owner": {
+        const owner = value.toLowerCase() === "me" ? me : value.toLowerCase();
+        if (owner && owner !== me && !STAFF_EDIT_ROLES.has(auth.role)) return { error: "forbidden_owner", field: key };
+        if (owner && !/^[^@\s]+@[^@\s]+$/.test(owner)) return { error: "invalid_owner", field: key };
+        fields.Owner = owner;
+        // Claiming only works on unowned leads; unclaiming only your own (staff can force).
+        if (!canEditOthers) ifOwnerIn = owner ? ["", me] : [me];
+        break;
+      }
+      case "Next_step":
+        if (value.length > 140) return { error: "too_long", field: key };
+        fields.Next_step = value;
+        break;
+      case "Next_step_due":
+      case "Demo_at":
+        if (value && !isIsoDate(value)) return { error: "invalid_date", field: key };
+        fields[key] = value;
+        break;
+      case "Deal_value":
+      case "Students": {
+        const n = Number(value);
+        const max = key === "Deal_value" ? 1e8 : 1e5;
+        if (value && (!Number.isInteger(n) || n < 0 || n > max)) return { error: "invalid_number", field: key };
+        fields[key] = value;
+        break;
+      }
+      case "Package":
+        if (value.length > 60) return { error: "too_long", field: key };
+        fields.Package = value;
+        break;
+      case "Do_not_contact":
+        if (value && value !== "manual") return { error: "invalid_value", field: key };
+        fields.Do_not_contact = value ? `manual:${now}` : "";
+        break;
+      case "WhatsApp_number": {
+        const phone = value ? leadKeyFromPhone(value) : "";
+        if (phone && !/^\+\d{8,15}$/.test(phone)) return { error: "invalid_phone", field: key };
+        fields.WhatsApp_number = phone;
+        break;
+      }
+      default:
+        return { error: "field_not_allowed", field: key };
+    }
   }
 
-  const upstream = await fetch(url.toString(), {
-    method: "GET",
-    headers: { Accept: "application/json" },
+  if (fields.Stage === "Lost" && !fields.Lost_reason) return { error: "lost_reason_required", field: "Lost_reason" };
+  if (["call", "whatsapp", "email"].includes(safeText(body.touch))) fields.First_touch_at = now;
+  return { fields, ifOwnerIn };
+}
+
+/** Sends a lead update through n8n ("Sales • Update Lead") and maps its outcome to HTTP. */
+async function updateLeadInSheet(
+  leadId: string,
+  fields: Record<string, string>,
+  actor: { email?: string; role?: string },
+  ifOwnerIn?: string[]
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const { status, data } = await callN8nWebhook("sheet-lead-update", {
+    method: "POST",
+    body: { leadId, fields, ifOwnerIn, actor },
+    timeoutMs: 20_000,
   });
-  const text = await upstream.text();
-  let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`Unexpected sheets webhook response: ${text.slice(0, 120)}`);
+  const result = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
+  if (status === 200) {
+    sheetCache = null;
+    return { status: 200, body: { ok: true, lead: result.lead || null } };
   }
-  if (!upstream.ok) {
-    const message =
-      data && typeof data === "object" && typeof (data as Record<string, unknown>).message === "string"
-        ? String((data as Record<string, unknown>).message)
-        : "Sheets leads fetch failed";
-    throw new Error(message);
-  }
-
-  let rows: unknown[] = [];
-  if (Array.isArray(data)) rows = data;
-  else if (data && typeof data === "object") {
-    const obj = data as Record<string, unknown>;
-    if (Array.isArray(obj.rows)) rows = obj.rows;
-    else if (Array.isArray(obj.data)) rows = obj.data;
-    else if (Array.isArray(obj.leads)) rows = obj.leads;
-  }
-  return { fetchedAt: new Date().toISOString(), rows: filterLeadRows(rows, query) };
+  // A bare 404 from n8n means the webhook isn't registered, not that the lead is missing.
+  if (status === 404 && result.error === "not_found") return { status: 404, body: { error: "not_found" } };
+  if (status === 409) return { status: 409, body: { error: "owner_conflict", owner: result.owner || "" } };
+  logger.warn("lead update via n8n failed", { status, leadId });
+  return { status: 502, body: { error: "upstream_error" } };
 }
 
 function leadCity(row: Record<string, unknown>): string {
@@ -1627,7 +1789,12 @@ app.post("/api/twilio/status", async (req, res) => {
   const signature = req.get("x-twilio-signature") || undefined;
   const callbackUrls = twilioSignatureUrlCandidates(req, "/api/twilio/status");
   if (!validateTwilioRequestForAnyUrl(t.authToken, signature, callbackUrls, params)) {
-    logger.warn("Twilio status signature mismatch", { callbackUrl: callbackUrls[0] });
+    logger.warn("Twilio status signature mismatch", {
+      host: req.get("host"),
+      forwardedHost: req.get("x-forwarded-host"),
+      originalUrl: req.originalUrl,
+      tried: callbackUrls.length,
+    });
     return res.status(403).send("Invalid signature");
   }
 
@@ -1672,7 +1839,12 @@ app.post("/api/twilio/inbound", async (req, res) => {
   const signature = req.get("x-twilio-signature") || undefined;
   const callbackUrls = twilioSignatureUrlCandidates(req, "/api/twilio/inbound");
   if (!validateTwilioRequestForAnyUrl(t.authToken, signature, callbackUrls, params)) {
-    logger.warn("Twilio inbound signature mismatch", { callbackUrl: callbackUrls[0] });
+    logger.warn("Twilio inbound signature mismatch", {
+      host: req.get("host"),
+      forwardedHost: req.get("x-forwarded-host"),
+      originalUrl: req.originalUrl,
+      tried: callbackUrls.length,
+    });
     return res.status(403).send("Invalid signature");
   }
 
@@ -2033,6 +2205,120 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
   }
 });
 
+// ─── Sales: city runs, lead updates, activity, unsubscribe ───
+
+app.post("/api/sales/city-runs", requireRoles(SALES_N8N_ROLES), async (req, res) => {
+  const auth = getAuthedUser(req);
+  const city = safeText(req.body?.city);
+  const preset = safeText(req.body?.preset || "cbse").toLowerCase();
+  const queryPrefix = CITY_RUN_PRESETS[preset];
+  if (!/^\p{L}[\p{L} .'-]{1,59}$/u.test(city)) return res.status(400).json({ error: "invalid_city" });
+  if (!queryPrefix) return res.status(400).json({ error: "invalid_preset" });
+
+  try {
+    const { status, data } = await callN8nWebhook("city-scrape-start", {
+      query: { city, queryPrefix, query: `${queryPrefix} ${city}`, startedAt: new Date().toISOString() },
+      timeoutMs: 15_000,
+    });
+    const result = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
+    const ok = status < 400;
+    await writeOpsAudit({
+      action: ok ? "n8n.city_scrape.launch" : "n8n.city_scrape.launch_failed",
+      auth,
+      targetId: city,
+      details: { city, preset, responseStatus: status, n8nExecutionId: result.executionId || null },
+    });
+    if (!ok) return res.status(502).json({ error: "upstream_error" });
+    return res.status(202).json({ executionId: result.executionId || null, status: "started", city });
+  } catch (err) {
+    logger.error("city run launch failed", err);
+    return res.status(502).json({ error: "upstream_error" });
+  }
+});
+
+app.patch("/api/leads/:leadId", requireRoles(SHEETS_ROLES), async (req, res) => {
+  const auth = getAuthedUser(req)!;
+  const leadId = safeText(req.params.leadId);
+  if (!LEAD_ID_PATTERN.test(leadId)) return res.status(400).json({ error: "invalid_lead_id" });
+  const body = (req.body || {}) as Record<string, unknown>;
+  const note = safeText(body.note).slice(0, 2000);
+  const patch = buildLeadPatch(body, auth);
+  if ("error" in patch) return res.status(400).json(patch);
+  const hasFields = Object.keys(patch.fields).length > 0;
+  if (!hasFields && !note) return res.status(400).json({ error: "nothing_to_update" });
+
+  try {
+    let result: { status: number; body: Record<string, unknown> } = { status: 200, body: { ok: true, lead: null } };
+    if (hasFields) {
+      result = await updateLeadInSheet(leadId, patch.fields, { email: auth.email, role: auth.role }, patch.ifOwnerIn);
+      if (result.status !== 200) return res.status(result.status).json(result.body);
+      await writeOpsAudit({ action: "lead.update", auth, targetId: leadId, details: { fields: patch.fields } });
+    }
+    // Notes live in the audit log so a lead's activity is one feed.
+    if (note) await writeOpsAudit({ action: "lead.note", auth, targetId: leadId, details: { text: note } });
+    return res.json(result.body);
+  } catch (err) {
+    logger.error("lead update failed", err);
+    return res.status(502).json({ error: "upstream_error" });
+  }
+});
+
+app.get("/api/leads/:leadId/activity", requireRoles(SHEETS_ROLES), async (req, res) => {
+  const leadId = safeText(req.params.leadId);
+  if (!LEAD_ID_PATTERN.test(leadId)) return res.status(400).json({ error: "invalid_lead_id" });
+  try {
+    const snap = await getDataProjectDb()
+      .collection(OPS_AUDIT_COLLECTION)
+      .where("targetId", "==", leadId)
+      .limit(200)
+      .get();
+    const items = snap.docs
+      .map((doc) => doc.data() || {})
+      .map((d) => ({ action: d.action, actorEmail: d.actorEmail || null, createdAt: d.createdAt, details: d.details || {} }))
+      .sort((a, b) => parseMaybeDate(b.createdAt) - parseMaybeDate(a.createdAt));
+    return res.json({ items });
+  } catch (err) {
+    logger.error("lead activity failed", err);
+    return res.status(502).json({ error: "activity_unavailable" });
+  }
+});
+
+function unsubscribePage(title: string, body: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f6f7f9;color:#111827;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:16px}main{background:#fff;border:1px solid #e5e7eb;border-radius:12px;max-width:420px;padding:28px}h1{font-size:20px;margin:0 0 8px}p{color:#4b5563;line-height:1.5}button{background:#111827;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:15px;cursor:pointer}</style></head><body><main><h1>${title}</h1>${body}</main></body></html>`;
+}
+
+const UNSUBSCRIBE_NOT_FOUND = unsubscribePage("Link not found", "<p>This unsubscribe link is not valid.</p>");
+
+// Unsubscribe link in cold emails. GET only shows a confirm button, so mail scanners that
+// pre-fetch links can't unsubscribe anyone; the POST does the work.
+app.get("/u/:leadId", (req, res) => {
+  if (!LEAD_ID_PATTERN.test(safeText(req.params.leadId))) return res.status(404).send(UNSUBSCRIBE_NOT_FOUND);
+  res.setHeader("Cache-Control", "no-store");
+  return res.send(
+    unsubscribePage(
+      "Stop LearnXR emails?",
+      '<p>Confirm and we won\'t email this address again.</p><form method="post"><button type="submit">Unsubscribe</button></form>'
+    )
+  );
+});
+
+app.post("/u/:leadId", async (req, res) => {
+  const leadId = safeText(req.params.leadId);
+  if (!LEAD_ID_PATTERN.test(leadId)) return res.status(404).send(UNSUBSCRIBE_NOT_FOUND);
+  try {
+    // Only Do_not_contact: a customer who unsubscribes from outreach keeps their deal stage.
+    const result = await updateLeadInSheet(leadId, { Do_not_contact: `unsubscribed:${new Date().toISOString()}` }, { role: "lead" });
+    await writeOpsAudit({ action: "lead.unsubscribe", targetId: leadId, details: { status: result.status } });
+    if (result.status !== 200 && result.status !== 404) throw new Error(`lead update returned ${result.status}`);
+  } catch (err) {
+    logger.error("unsubscribe failed", err);
+    return res
+      .status(502)
+      .send(unsubscribePage("Something went wrong", "<p>Please reply &quot;unsubscribe&quot; to our email and we'll remove you.</p>"));
+  }
+  return res.send(unsubscribePage("You're unsubscribed", "<p>We won't email you again. Sorry for the interruption.</p>"));
+});
+
 // Auth-gated fallback for hosting rewrite path variants (n8n only)
 app.get(/.*/, async (req, res) => {
   const originalUrl = req.originalUrl || req.url || "";
@@ -2128,6 +2414,7 @@ export const api = onRequest(
     secrets: [
       n8nApiUrlSecret,
       n8nApiKeySecret,
+      n8nWebhookSecret,
       twilioAccountSidSecret,
       twilioAuthTokenSecret,
       twilioMessagingServiceSidSecret,
