@@ -67,6 +67,11 @@ const SALES_WORKFLOW_ID =
   (import.meta.env.VITE_N8N_SALES_WORKFLOW_ID as string | undefined) || 'sLk0CAalsSlR5z4P';
 
 const POLL_INTERVAL_MS = 2500;
+/** Stop watching a run when n8n keeps returning nothing or it hangs, so Run Pipeline never locks. */
+const MAX_EMPTY_POLLS = 12;
+const MAX_WATCH_MS = 20 * 60 * 1000;
+const RESUME_MAX_AGE_MS = 30 * 60 * 1000;
+const LEAD_SEARCH_COLUMNS = ['School Name', 'Email ID', 'City', 'Phone number', 'Lead_status', 'Whatsapp_status'];
 
 type Mode = 'test' | 'production' | 'custom';
 type HeaderStatus = { text: string; kind: '' | 'ok' | 'warn' };
@@ -296,16 +301,12 @@ export default function SalesFunnelPage() {
     }
   }, []);
 
+  // Fetch every lead once; filters below run in memory so typing never refetches.
   const loadLeads = useCallback(async () => {
     setLeadsLoading(true);
     setLeadsError(null);
     try {
-      const result = await fetchSheetLeads({
-        q: leadQuery.trim() || undefined,
-        city: leadCity.trim() || undefined,
-        leadStatus: leadStatusFilter.trim() || undefined,
-        limit: 2000,
-      });
+      const result = await fetchSheetLeads({ limit: 2000 });
       setLeads(result.rows);
       setLeadsFetchedAt(result.fetchedAt);
     } catch (e) {
@@ -314,7 +315,35 @@ export default function SalesFunnelPage() {
     } finally {
       setLeadsLoading(false);
     }
-  }, [leadQuery, leadCity, leadStatusFilter]);
+  }, []);
+
+  const filteredLeads = useMemo(() => {
+    const q = leadQuery.trim().toLowerCase();
+    const cityQ = leadCity.trim().toLowerCase();
+    const statusQ = leadStatusFilter.trim().toLowerCase();
+    return leads.filter((row) => {
+      if (cityQ && !cell(row, 'City').toLowerCase().includes(cityQ)) return false;
+      if (statusQ && cell(row, 'Lead_status').trim().toLowerCase() !== statusQ) return false;
+      if (q && !LEAD_SEARCH_COLUMNS.some((col) => cell(row, col).toLowerCase().includes(q))) return false;
+      return true;
+    });
+  }, [leads, leadQuery, leadCity, leadStatusFilter]);
+
+  const stopWatching = useCallback(
+    async (text: string) => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+      setPollingExecutionId(null);
+      setStatus({ text, kind: 'warn' });
+      if (!activeRunId) return;
+      const stoppedAt = new Date().toISOString();
+      patchExecution(activeRunId, { status: 'error', stoppedAt });
+      if (firebaseEnabled) {
+        await updateSalesFunnelRun(activeRunId, { status: 'error', stoppedAt, ok: false });
+      }
+    },
+    [activeRunId, firebaseEnabled, patchExecution]
+  );
 
   useEffect(() => {
     let alive = true;
@@ -336,7 +365,12 @@ export default function SalesFunnelPage() {
       if (historyFromFb.length) localStorage.setItem(storageKeys.history, JSON.stringify(historyFromFb));
       if (logsFromFb.length) localStorage.setItem(storageKeys.logs, JSON.stringify(logsFromFb));
 
-      const waiting = runs.find((r) => r.status === 'waiting' && r.n8nExecutionId);
+      const waiting = runs.find(
+        (r) =>
+          r.status === 'waiting' &&
+          r.n8nExecutionId &&
+          Date.now() - Date.parse(r.startedAt) < RESUME_MAX_AGE_MS
+      );
       if (waiting?.n8nExecutionId) {
         setActiveRunId(waiting.id);
         setPollingExecutionId(waiting.n8nExecutionId);
@@ -354,9 +388,22 @@ export default function SalesFunnelPage() {
   useEffect(() => {
     if (!pollingExecutionId || !canPollExecution) return;
 
+    let active = true;
+    let emptyPolls = 0;
+    const watchStartedAt = Date.now();
+
     const poll = async () => {
       const exec = await getSalesExecutionStatus(pollingExecutionId);
-      if (!exec) return;
+      if (!active) return;
+      if (!exec) {
+        emptyPolls += 1;
+        if (emptyPolls >= MAX_EMPTY_POLLS) {
+          active = false;
+          await stopWatching('No status from n8n · stopped watching');
+        }
+        return;
+      }
+      emptyPolls = 0;
       const nodes = mapRunDataToNodes(exec);
       const runId = activeRunId;
 
@@ -391,6 +438,12 @@ export default function SalesFunnelPage() {
         return;
       }
 
+      if (Date.now() - watchStartedAt > MAX_WATCH_MS) {
+        active = false;
+        await stopWatching('Still running after 20 min · see Recent n8n Runs');
+        return;
+      }
+
       if (runId) {
         patchExecution(runId, { status: 'waiting', nodes, n8nExecutionId: exec.id });
       }
@@ -400,6 +453,7 @@ export default function SalesFunnelPage() {
     void poll();
     pollRef.current = setInterval(() => void poll(), POLL_INTERVAL_MS);
     return () => {
+      active = false;
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = null;
     };
@@ -410,6 +464,7 @@ export default function SalesFunnelPage() {
     patchExecution,
     refreshRecentN8n,
     loadLeads,
+    stopWatching,
   ]);
 
   const onSubmit = async (event: React.FormEvent) => {
@@ -681,9 +736,20 @@ export default function SalesFunnelPage() {
                 {submitting ? 'Initializing...' : pollingExecutionId ? 'Pipeline running…' : 'Run Pipeline'}
                 <Workflow className="ml-2 w-4 h-4" />
               </Button>
-              <Button type="button" variant="outline" onClick={onReset} className="px-5">
-                Reset
-              </Button>
+              {pollingExecutionId ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void stopWatching('Stopped watching · run may continue in n8n')}
+                  className="px-5"
+                >
+                  Stop watching
+                </Button>
+              ) : (
+                <Button type="button" variant="outline" onClick={onReset} className="px-5">
+                  Reset
+                </Button>
+              )}
             </div>
           </form>
         </div>
@@ -868,7 +934,7 @@ export default function SalesFunnelPage() {
         </div>
       </div>
 
-      <SalesInsightsPanel leads={leads} onSelectLead={setSelectedLead} />
+      <SalesInsightsPanel leads={filteredLeads} onSelectLead={setSelectedLead} />
 
       {/* Leads from Google Sheets */}
       <div className="surface-card p-5 mt-6">
@@ -907,17 +973,12 @@ export default function SalesFunnelPage() {
             onChange={(e) => setLeadCity(e.target.value)}
             className="h-9 text-xs"
           />
-          <div className="flex gap-2">
-            <Input
-              placeholder="Lead_status"
-              value={leadStatusFilter}
-              onChange={(e) => setLeadStatusFilter(e.target.value)}
-              className="h-9 text-xs flex-1"
-            />
-            <Button type="button" variant="secondary" className="h-9 text-xs" onClick={() => void loadLeads()}>
-              Apply
-            </Button>
-          </div>
+          <Input
+            placeholder="Lead_status"
+            value={leadStatusFilter}
+            onChange={(e) => setLeadStatusFilter(e.target.value)}
+            className="h-9 text-xs"
+          />
         </div>
 
         {leadsError && (
@@ -942,14 +1003,14 @@ export default function SalesFunnelPage() {
                     Loading leads…
                   </td>
                 </tr>
-              ) : !leads.length ? (
+              ) : !filteredLeads.length ? (
                 <tr>
                   <td colSpan={LEAD_COLUMNS.length} className="px-3 py-8 text-center text-zinc-600">
                     No leads found
                   </td>
                 </tr>
               ) : (
-                leads.map((row, idx) => {
+                filteredLeads.map((row, idx) => {
                   const phone = leadPhoneForMessaging(row);
                   return (
                     <tr
@@ -985,7 +1046,7 @@ export default function SalesFunnelPage() {
             </tbody>
           </table>
         </div>
-        <p className="mt-2 text-[10px] text-zinc-600">{leads.length} row(s) shown</p>
+        <p className="mt-2 text-[10px] text-zinc-600">{filteredLeads.length} of {leads.length} row(s) shown</p>
       </div>
 
       {selectedLead && (

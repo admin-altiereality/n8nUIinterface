@@ -65,7 +65,10 @@ const OPS_AUDIT_COLLECTION = "opsAuditLog";
 const DEFAULT_WHATSAPP_QUICK_REPLY_TEMPLATE_SID = "HX9fab5aaad062c64423df7a312c84e6af";
 const DEFAULT_QUICK_REPLY_TEMPLATE_NAME = "LearnXR quick reply";
 const MEDIA_SIZE_LIMIT_BYTES = 16 * 1024 * 1024;
-const SUPPORTED_MEDIA_CONTENT_TYPE = /^(image\/|video\/|audio\/|application\/pdf$)/i;
+// SVG is excluded: it can carry script and would run on this origin.
+const SUPPORTED_MEDIA_CONTENT_TYPE = /^(image\/(?!svg)|video\/|audio\/|application\/pdf$)/i;
+const DATA_PROJECT_ID = process.env.GCLOUD_PROJECT || "lexrn1";
+const MEDIA_BUCKETS = new Set([`${DATA_PROJECT_ID}.appspot.com`, `${DATA_PROJECT_ID}.firebasestorage.app`]);
 const TWILIO_STATUS_RANK: Record<string, number> = {
   queued: 0,
   accepted: 1,
@@ -129,11 +132,6 @@ function getAuthProjectVerifier() {
   return getAdminAuth(getAuthProjectApp());
 }
 
-function getAuthProjectDb() {
-  const { getFirestore } = adminFirestoreModule();
-  return getFirestore(getAuthProjectApp());
-}
-
 function getDataProjectAuth() {
   ensureAdminDefaultApp();
   const { getAuth: getAdminAuth } = adminAuthModule();
@@ -181,58 +179,14 @@ function getTwilioConfig():
   };
 }
 
-async function resolveRole(
-  uid: string,
-  decoded: Record<string, unknown>,
-  idToken?: string
-): Promise<string | null> {
-  const claimRole = decoded.role || decoded.userRole;
-  if (typeof claimRole === "string" && claimRole.trim()) return claimRole.trim();
-
-  // Prefer local (lexrn1) mirror written during data-token exchange
-  try {
-    const local = await getDataProjectDb().collection("users").doc(uid).get();
-    if (local.exists) {
-      const d = local.data() || {};
-      const r = d.role || d.userRole;
-      if (typeof r === "string" && r.trim()) return r.trim();
-    }
-  } catch (err) {
-    logger.warn("lexrn1 role lookup failed", err);
-  }
-
-  // Auth project via Admin SDK (needs SA access on learnxr-evoneuralai)
-  try {
-    const remote = await getAuthProjectDb().collection("users").doc(uid).get();
-    if (remote.exists) {
-      const d = remote.data() || {};
-      const r = d.role || d.userRole;
-      if (typeof r === "string" && r.trim()) return r.trim();
-    }
-  } catch (err) {
-    logger.warn("auth-project admin role lookup failed", err);
-  }
-
-  // Fallback: read users/{uid} as the end-user (their token already allows own-doc read)
-  if (idToken) {
-    try {
-      const url =
-        `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(AUTH_FIREBASE_PROJECT_ID)}` +
-        `/databases/(default)/documents/users/${encodeURIComponent(uid)}`;
-      const resp = await fetch(url, { headers: { Authorization: `Bearer ${idToken}` } });
-      if (resp.ok) {
-        const doc = (await resp.json()) as {
-          fields?: { role?: { stringValue?: string }; userRole?: { stringValue?: string } };
-        };
-        const r = doc.fields?.role?.stringValue || doc.fields?.userRole?.stringValue;
-        if (typeof r === "string" && r.trim()) return r.trim();
-      }
-    } catch (err) {
-      logger.warn("auth-project user-token role lookup failed", err);
-    }
-  }
-
-  return null;
+/**
+ * Agent access comes only from the `agentRole` custom claim, which only the Admin SDK can set
+ * (functions/create-users.mjs). Firestore `users.role` is product data that signed-up users can
+ * write themselves, so it must never grant access here.
+ */
+function resolveRole(decoded: Record<string, unknown>): string | null {
+  const role = decoded.agentRole;
+  return typeof role === "string" && role.trim() ? role.trim() : null;
 }
 
 async function authenticateRequest(req: express.Request): Promise<AuthedUser | { error: string; status: number }> {
@@ -248,7 +202,7 @@ async function authenticateRequest(req: express.Request): Promise<AuthedUser | {
     if (!decoded.uid) {
       return { error: "Invalid ID token.", status: 401 };
     }
-    const role = await resolveRole(decoded.uid, decoded as unknown as Record<string, unknown>, idToken);
+    const role = resolveRole(decoded as unknown as Record<string, unknown>);
     if (!role || !AGENT_ROLES.has(role)) {
       return { error: "Forbidden: agent role required.", status: 403 };
     }
@@ -277,16 +231,19 @@ function requireRoles(allowed: Set<string>) {
   };
 }
 
+/** Only files in this project's own Storage bucket; any other bucket could be attacker-controlled. */
 function isAllowedMediaUrl(mediaUrl: string): boolean {
   try {
     const u = new URL(mediaUrl);
     if (u.protocol !== "https:") return false;
     const host = u.hostname.toLowerCase();
-    return (
-      host === "firebasestorage.googleapis.com" ||
-      host.endsWith(".firebasestorage.app") ||
-      host === "storage.googleapis.com"
-    );
+    let bucket = "";
+    if (host === "firebasestorage.googleapis.com") {
+      bucket = /^\/v0\/b\/([^/]+)\//.exec(u.pathname)?.[1] || "";
+    } else if (host === "storage.googleapis.com") {
+      bucket = u.pathname.split("/")[1] || "";
+    }
+    return MEDIA_BUCKETS.has(decodeURIComponent(bucket).toLowerCase());
   } catch {
     return false;
   }
@@ -1776,11 +1733,16 @@ app.get("/api/twilio/media/:filename", async (req, res) => {
       return res.status(upstream.status).send("Media unavailable");
     }
     const contentType = upstream.headers.get("content-type") || "application/octet-stream";
+    if (!SUPPORTED_MEDIA_CONTENT_TYPE.test(contentType)) {
+      return res.status(415).send("Unsupported media type");
+    }
     const body = Buffer.from(await upstream.arrayBuffer());
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Length", String(body.length));
     res.setHeader("Content-Disposition", contentDispositionFilename(filename));
     res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
     return res.status(200).send(body);
   } catch (err) {
     logger.warn("Twilio media proxy failed", err);
