@@ -32,12 +32,10 @@ export function SalesInsightsPanel({ leads, onSelectLead }: Props) {
   const templates = useMemo(() => templateStats(leads), [leads]);
   const cities = useMemo(() => cityFunnels(leads, now), [leads, now]);
 
-  const tracked = templates.filter((t) => t.templateId !== 't00_legacy');
-  const leader = tracked.find((t) => t.sends >= MIN_SENDS_FOR_VERDICT);
-  const runnerUpHigh = leader
-    ? Math.max(0, ...tracked.filter((t) => t !== leader && t.sends >= MIN_SENDS_FOR_VERDICT).map((t) => t.ctrHigh))
-    : 0;
-  const leaderIsClear = Boolean(leader && leader.ctrLow > runnerUpHigh);
+  // A winner needs at least two templates with enough sends to compare (templates are sorted by CTR).
+  const eligible = templates.filter((t) => t.templateId !== 't00_legacy' && t.sends >= MIN_SENDS_FOR_VERDICT);
+  const leader = eligible.length >= 2 ? eligible[0] : undefined;
+  const leaderIsClear = Boolean(leader && leader.ctrLow > Math.max(...eligible.slice(1).map((t) => t.ctrHigh)));
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 mt-6">
@@ -62,8 +60,8 @@ export function SalesInsightsPanel({ leads, onSelectLead }: Props) {
           </select>
         </div>
         <p className="text-[10px] text-zinc-600 mb-3">
-          Score = button intent (demo 5, pricing 4, WhatsApp 4, website 3, video 2) + extra clicks + replies, halving every 14 days.
-          Scanner clicks are excluded.
+          Score = button intent (demo 5, pricing 4, WhatsApp 4, try 3, website 2, video 2) + extra clicks + reply
+          (demo 8, pricing 7, positive 6, question 4, other 2), halving every 14 days. Scanner clicks are excluded.
         </p>
         <div className="space-y-2 max-h-[420px] overflow-y-auto">
           {hotFiltered.map((h, idx) => {
@@ -133,14 +131,14 @@ export function SalesInsightsPanel({ leads, onSelectLead }: Props) {
           <p className="text-[10px] text-zinc-600 mb-3">
             Unique click-through per first-email template with a 90% interval. n8n shifts new sends toward the leader
             automatically (Thompson sampling) after {MIN_SENDS_FOR_VERDICT} sends each.
-            {leader && (
-              <span className={leaderIsClear ? 'text-emerald-400' : 'text-amber-400'}>
-                {' '}
-                {leaderIsClear
+            <span className={leaderIsClear ? 'text-emerald-400' : 'text-amber-400'}>
+              {' '}
+              {!leader
+                ? `No verdict yet: it needs two templates with ${MIN_SENDS_FOR_VERDICT}+ sends each.`
+                : leaderIsClear
                   ? `${leader.label} is clearly ahead.`
                   : 'No clear winner yet — intervals overlap.'}
-              </span>
-            )}
+            </span>
           </p>
           <div className="overflow-auto rounded-lg border border-zinc-800">
             <table className="w-full text-left text-[11px]">
@@ -199,7 +197,7 @@ export function SalesInsightsPanel({ leads, onSelectLead }: Props) {
             <table className="w-full text-left text-[11px]">
               <thead className="sticky top-0 bg-zinc-900 text-zinc-500">
                 <tr className="border-b border-zinc-800">
-                  {['City', 'Scraped', 'Emailed', 'Opened', 'Clicked', 'Replied', 'WhatsApp', 'Hot'].map((h) => (
+                  {['City', 'Leads', 'Contacted', 'Replied', 'Demos', 'Won', 'Hot'].map((h) => (
                     <th key={h} className={`px-3 py-2 font-medium ${h === 'City' ? '' : 'text-right'}`}>
                       {h}
                     </th>
@@ -210,15 +208,14 @@ export function SalesInsightsPanel({ leads, onSelectLead }: Props) {
                 {cities.map((c) => (
                   <tr key={c.city} className="border-b border-zinc-800/60">
                     <td className="px-3 py-2 text-zinc-200">{c.city}</td>
-                    <td className="px-3 py-2 text-right text-zinc-400">{c.scraped}</td>
-                    <td className="px-3 py-2 text-right text-zinc-400">{c.emailed}</td>
-                    <td className="px-3 py-2 text-right text-zinc-400">{c.opened}</td>
+                    <td className="px-3 py-2 text-right text-zinc-400">{c.leads}</td>
+                    <td className="px-3 py-2 text-right text-zinc-400">{c.contacted}</td>
                     <td className="px-3 py-2 text-right text-zinc-300">
-                      {c.clicked}
-                      {c.emailed > 0 && <span className="text-zinc-600"> ({pct(c.clicked / c.emailed)})</span>}
+                      {c.replied}
+                      {c.contacted > 0 && <span className="text-zinc-600"> ({pct(c.replied / c.contacted)})</span>}
                     </td>
-                    <td className="px-3 py-2 text-right text-zinc-300">{c.replied}</td>
-                    <td className="px-3 py-2 text-right text-zinc-400">{c.whatsapp}</td>
+                    <td className="px-3 py-2 text-right text-zinc-300">{c.demos}</td>
+                    <td className="px-3 py-2 text-right text-zinc-300">{c.won}</td>
                     <td className="px-3 py-2 text-right">
                       {c.hot > 0 ? <Badge variant="warning" className="text-[9px]">{c.hot}</Badge> : <span className="text-zinc-600">0</span>}
                     </td>

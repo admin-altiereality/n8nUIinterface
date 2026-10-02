@@ -261,13 +261,17 @@ export async function listSalesExecutions(
   }
 }
 
-export async function getSalesExecutionStatus(executionId: string): Promise<N8nExecution | null> {
+/** A funnel run's status; with `nodes`, also each node's timing and item counts (much heavier for n8n). */
+export async function getSalesExecutionStatus(
+  executionId: string,
+  { nodes = false }: { nodes?: boolean } = {}
+): Promise<N8nExecution | null> {
   const proxyBase = getProxyBase();
   if (proxyBase === null && !import.meta.env.PROD) {
     return null;
   }
   const base = proxyBase === null ? '' : proxyBase;
-  const proxyUrl = `${base}/api/n8n/sales-executions/${encodeURIComponent(executionId)}`;
+  const proxyUrl = `${base}/api/n8n/sales-executions/${encodeURIComponent(executionId)}${nodes ? '?nodes=1' : ''}`;
 
   try {
     const res = await fetchWithAuthRetry(proxyUrl);

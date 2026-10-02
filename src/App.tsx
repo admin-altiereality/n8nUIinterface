@@ -2,6 +2,8 @@ import React from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import LessonBuilderPage from './pages/LessonBuilderPage';
 import SalesFunnelPage from './pages/SalesFunnelPage';
+import SalesHomePage from './pages/SalesHomePage';
+import PipelinePage from './pages/PipelinePage';
 import TwilioMessagingPage from './pages/TwilioMessagingPage';
 import OpsDashboardPage from './pages/OpsDashboardPage';
 import LeadTimelinePage from './pages/LeadTimelinePage';
@@ -46,6 +48,26 @@ const App: React.FC = () => {
           }
         />
         <Route
+          path="/sales"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <SalesHomePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/pipeline"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <PipelinePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="/sales-funnel"
           element={
             <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
@@ -58,7 +80,7 @@ const App: React.FC = () => {
         <Route
           path="/twilio-messaging"
           element={
-            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'whatsapp_manager']}>
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson', 'whatsapp_manager']}>
               <AppLayout>
                 <TwilioMessagingPage />
               </AppLayout>

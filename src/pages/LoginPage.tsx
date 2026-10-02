@@ -21,7 +21,7 @@ const LoginPage: React.FC = () => {
   const getRedirectPath = (role: string) => {
     if (from !== '/') return from;
     switch (role) {
-      case 'salesperson': return '/sales-funnel';
+      case 'salesperson': return '/sales';
       case 'whatsapp_manager': return '/twilio-messaging';
       case 'associate': return '/';
       default: return '/';

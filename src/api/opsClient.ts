@@ -152,6 +152,67 @@ export async function startCityRun(city: string, preset: CityRunPreset): Promise
   return (await res.json()) as { executionId: string | null; city: string };
 }
 
+export type LeadPatch = {
+  fields?: Record<string, string>;
+  note?: string;
+  /** Logs a first touch (call, WhatsApp or email) on the lead. */
+  touch?: 'call' | 'whatsapp' | 'email';
+  event?: 'no_show';
+};
+
+/** A refused lead update; `code` is the backend's error, e.g. `owner_conflict` with the current `owner`. */
+export class LeadUpdateError extends Error {
+  code: string;
+  owner?: string;
+
+  constructor(message: string, code: string, owner?: string) {
+    super(message);
+    this.name = 'LeadUpdateError';
+    this.code = code;
+    this.owner = owner;
+  }
+}
+
+const LEAD_ERROR_MESSAGES: Record<string, string> = {
+  owner_conflict: 'Someone else has already claimed this lead.',
+  lost_reason_required: 'Pick a reason before marking the lead Lost.',
+  not_found: 'This lead is no longer in the sheet.',
+  too_long: 'That text is too long.',
+  invalid_date: 'That date is not valid.',
+  invalid_number: 'Enter a whole number.',
+  forbidden_owner: 'Only admins can assign leads to someone else.',
+  upstream_error: 'The sheet could not be updated. Try again in a minute.',
+};
+
+/** Updates whitelisted lead fields in the sheet and/or adds a note to the lead's activity. */
+export async function patchLead(leadId: string, patch: LeadPatch): Promise<SchoolLeadRow | null> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/leads/${encodeURIComponent(leadId)}`), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  const data = (await res.json().catch(() => ({}))) as { lead?: SchoolLeadRow | null; error?: string; owner?: string; message?: string };
+  if (!res.ok) {
+    const code = data.error || `http_${res.status}`;
+    throw new LeadUpdateError(LEAD_ERROR_MESSAGES[code] || data.message || 'Could not update the lead.', code, data.owner);
+  }
+  return data.lead || null;
+}
+
+export type LeadActivityItem = {
+  action: string;
+  actorEmail: string | null;
+  createdAt?: string;
+  details: Record<string, unknown>;
+};
+
+export async function fetchLeadActivity(leadId: string): Promise<LeadActivityItem[]> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/leads/${encodeURIComponent(leadId)}/activity`));
+  if (!res.ok) await parseError(res, 'Failed to load lead activity');
+  const data = (await res.json()) as { items?: LeadActivityItem[] };
+  return Array.isArray(data.items) ? data.items : [];
+}
+
 export function opsExportUrl(): string {
   return opsUrl('/api/ops/export.csv');
 }

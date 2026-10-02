@@ -71,6 +71,31 @@ export type SchoolLeadRow = Record<string, unknown> & {
   Reply_snippet?: string;
   Whatsapp_reminder_count?: string;
   Whatsapp_reminder_at?: string;
+  // Pipeline columns (v3)
+  Lead_id?: string;
+  Org_key?: string;
+  Stage?: string;
+  Owner?: string;
+  Next_step?: string;
+  Next_step_due?: string;
+  Do_not_contact?: string;
+  Hot_at?: string;
+  First_touch_at?: string;
+  WhatsApp_number?: string;
+  Reply_channel?: string;
+  Demo_booked_at?: string;
+  Demo_at?: string;
+  Demo_done_at?: string;
+  Deal_value?: string;
+  Students?: string;
+  Package?: string;
+  Lost_at?: string;
+  Lost_reason?: string;
+  Won_at?: string;
+  Proposal_sent_at?: string;
+  Paid_amount?: string;
+  Paid_at?: string;
+  Clicked_buttons?: string;
 };
 
 export type FetchLeadsResult = {

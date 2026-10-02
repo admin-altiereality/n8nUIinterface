@@ -1,18 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import {
-  Activity,
-  CheckCircle2,
-  CircleAlert,
-  Workflow,
-  Target,
-  Cpu,
-  History as HistoryIcon,
-  Loader2,
-  RefreshCw,
-  Table2,
-  X,
-} from 'lucide-react';
+import { Activity, Workflow, Cpu, Loader2, RefreshCw, Table2 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Select } from '../components/ui/select';
@@ -40,14 +28,11 @@ import {
   type N8nExecution,
   type N8nExecutionListItem,
 } from '../api/n8nClient';
-import {
-  fetchSheetLeads,
-  leadPhoneForMessaging,
-  type SchoolLeadRow,
-} from '../api/sheetsClient';
+import { leadPhoneForMessaging, type SchoolLeadRow } from '../api/sheetsClient';
 import { startCityRun, type CityRunPreset } from '../api/opsClient';
 import { SalesInsightsPanel } from '../components/sales/SalesInsightsPanel';
-import { OPS_DASHBOARD_ROADMAP } from '../lib/opsDashboardRoadmap';
+import { LeadDrawer } from '../components/sales/LeadDrawer';
+import { useSheetLeads } from '../lib/useSheetLeads';
 
 const storageKeys = {
   history: 'sales_funnel_history',
@@ -68,21 +53,23 @@ const CITY_RUN_PRESETS: Array<{ value: CityRunPreset; label: string }> = [
 const SALES_WORKFLOW_ID =
   (import.meta.env.VITE_N8N_SALES_WORKFLOW_ID as string | undefined) || 'sLk0CAalsSlR5z4P';
 
-const POLL_INTERVAL_MS = 2500;
+/** Status-only polls are cheap; node counts are fetched once, when the run finishes. */
+const POLL_INTERVAL_MS = 5000;
 /** Stop watching a run when n8n keeps returning nothing or it hangs, so Run Pipeline never locks. */
 const MAX_EMPTY_POLLS = 12;
 const MAX_WATCH_MS = 20 * 60 * 1000;
 const RESUME_MAX_AGE_MS = 30 * 60 * 1000;
-const LEAD_SEARCH_COLUMNS = ['School Name', 'Email ID', 'City', 'Phone number', 'Lead_status', 'Whatsapp_status'];
+const LEAD_SEARCH_COLUMNS = ['School Name', 'Email ID', 'City', 'Phone number', 'Stage', 'Owner', 'Whatsapp_status'];
 
 type HeaderStatus = { text: string; kind: '' | 'ok' | 'warn' };
 
 const LEAD_COLUMNS = [
   'School Name',
   'City',
+  'Stage',
+  'Owner',
   'Email ID',
   'Phone number',
-  'Lead_status',
   'Status',
   'Reply_Status',
   'Email_template_id',
@@ -160,6 +147,17 @@ function cell(row: SchoolLeadRow, key: string): string {
   return String(v);
 }
 
+/** What a funnel run did, read from its node outputs (known once the run has been watched or inspected). */
+function runSummary(run: SalesFunnelExecution) {
+  const output = (name: string) => run.nodes.find((n) => n.name === name)?.itemsOutput;
+  return {
+    found: output('Split Out'),
+    added: output('Append or update row in sheet'),
+    emailed: output('Send Mail'),
+    sendFailures: run.nodes.some((n) => n.name === 'Summarize Send Failures'),
+  };
+}
+
 export default function SalesFunnelPage() {
   const [city, setCity] = useState<string>('');
   const [preset, setPreset] = useState<CityRunPreset>('cbse');
@@ -185,32 +183,29 @@ export default function SalesFunnelPage() {
   const [recentN8nSource, setRecentN8nSource] = useState<'n8n' | 'firestore' | 'unknown'>('unknown');
   const [selectedN8nId, setSelectedN8nId] = useState<string | null>(null);
 
-  const [leads, setLeads] = useState<SchoolLeadRow[]>([]);
-  const [leadsLoading, setLeadsLoading] = useState(false);
-  const [leadsError, setLeadsError] = useState<string | null>(null);
-  const [leadsFetchedAt, setLeadsFetchedAt] = useState<string | null>(null);
+  const {
+    leads,
+    loading: leadsLoading,
+    error: leadsError,
+    fetchedAt: leadsFetchedAt,
+    reload: loadLeads,
+    replaceLead,
+  } = useSheetLeads();
   const [leadQuery, setLeadQuery] = useState('');
   const [leadCity, setLeadCity] = useState('');
-  const [leadStatusFilter, setLeadStatusFilter] = useState('');
+  const [leadStageFilter, setLeadStageFilter] = useState('');
   const [selectedLead, setSelectedLead] = useState<SchoolLeadRow | null>(null);
 
-  const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+  const scrollAnchorRef = useRef<HTMLDetailsElement | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const firebaseEnabled = useMemo(() => isFirebaseConfigured(), []);
 
-  const successCount = useMemo(
-    () => executions.filter((e) => String(e.status).toLowerCase() === 'success').length,
-    [executions]
-  );
-  const errorCount = useMemo(
-    () => executions.filter((e) => String(e.status).toLowerCase() === 'error').length,
-    [executions]
-  );
-  const waitingCount = useMemo(
-    () => executions.filter((e) => String(e.status).toLowerCase() === 'waiting').length,
-    [executions]
-  );
   const latestRun = executions[0];
+  const latestSummary = latestRun ? runSummary(latestRun) : null;
+  // n8n has the real outcome; a run recorded here can carry a stale status from when polling failed.
+  const latestStatus =
+    (latestRun?.n8nExecutionId && recentN8n.find((item) => item.id === latestRun.n8nExecutionId)?.status) ||
+    latestRun?.status;
 
   const persistHistory = (items: SalesFunnelHistoryItem[]) => {
     const next = items.slice(0, 25);
@@ -271,33 +266,18 @@ export default function SalesFunnelPage() {
     }
   }, []);
 
-  // Fetch every lead once; filters below run in memory so typing never refetches.
-  const loadLeads = useCallback(async () => {
-    setLeadsLoading(true);
-    setLeadsError(null);
-    try {
-      const result = await fetchSheetLeads({ limit: 2000 });
-      setLeads(result.rows);
-      setLeadsFetchedAt(result.fetchedAt);
-    } catch (e) {
-      setLeadsError(e instanceof Error ? e.message : 'Failed to load leads');
-      setLeads([]);
-    } finally {
-      setLeadsLoading(false);
-    }
-  }, []);
-
+  // Filters run in memory over the leads loaded once, so typing never refetches.
   const filteredLeads = useMemo(() => {
     const q = leadQuery.trim().toLowerCase();
     const cityQ = leadCity.trim().toLowerCase();
-    const statusQ = leadStatusFilter.trim().toLowerCase();
+    const stageQ = leadStageFilter.trim().toLowerCase();
     return leads.filter((row) => {
       if (cityQ && !cell(row, 'City').toLowerCase().includes(cityQ)) return false;
-      if (statusQ && cell(row, 'Lead_status').trim().toLowerCase() !== statusQ) return false;
+      if (stageQ && cell(row, 'Stage').trim().toLowerCase() !== stageQ) return false;
       if (q && !LEAD_SEARCH_COLUMNS.some((col) => cell(row, col).toLowerCase().includes(q))) return false;
       return true;
     });
-  }, [leads, leadQuery, leadCity, leadStatusFilter]);
+  }, [leads, leadQuery, leadCity, leadStageFilter]);
 
   const stopWatching = useCallback(
     async (text: string) => {
@@ -324,9 +304,12 @@ export default function SalesFunnelPage() {
       if (!alive) return;
       const runs = items.map((i) => i.run);
       const historyFromFb = items.map((i) => i.history);
-      setExecutions(runs);
-      setHistory(historyFromFb);
-      setLogs(logsFromFb);
+      // An empty store must not wipe the runs this browser already recorded.
+      if (runs.length) {
+        setExecutions(runs);
+        setHistory(historyFromFb);
+      }
+      if (logsFromFb.length) setLogs(logsFromFb);
       if (items[0]?.resultText) {
         setResultText(items[0].resultText);
         localStorage.setItem(storageKeys.latestResultText, items[0].resultText);
@@ -349,11 +332,10 @@ export default function SalesFunnelPage() {
     };
     loadFromFirebase();
     void refreshRecentN8n();
-    void loadLeads();
     return () => {
       alive = false;
     };
-  }, [firebaseEnabled, refreshRecentN8n, loadLeads]);
+  }, [firebaseEnabled, refreshRecentN8n]);
 
   useEffect(() => {
     if (!pollingExecutionId || !canPollExecution) return;
@@ -374,12 +356,14 @@ export default function SalesFunnelPage() {
         return;
       }
       emptyPolls = 0;
-      const nodes = mapRunDataToNodes(exec);
       const runId = activeRunId;
 
       if (exec.finished) {
         if (pollRef.current) clearInterval(pollRef.current);
         pollRef.current = null;
+        // One full fetch at the end gives each node's counts for the run summary.
+        const full = await getSalesExecutionStatus(pollingExecutionId, { nodes: true });
+        const nodes = mapRunDataToNodes(full || exec);
         const finalStatus: SalesFunnelExecutionStatus = exec.status === 'error' ? 'error' : 'success';
         if (runId) {
           patchExecution(runId, {
@@ -415,9 +399,9 @@ export default function SalesFunnelPage() {
       }
 
       if (runId) {
-        patchExecution(runId, { status: 'waiting', nodes, n8nExecutionId: exec.id });
+        patchExecution(runId, { status: 'waiting', n8nExecutionId: exec.id });
       }
-      setStatus({ text: `Running · ${nodes[nodes.length - 1]?.name || '…'}`, kind: '' });
+      setStatus({ text: 'Running…', kind: '' });
     };
 
     void poll();
@@ -553,12 +537,15 @@ export default function SalesFunnelPage() {
     }
 
     void refreshRecentN8n();
-    scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (scrollAnchorRef.current) {
+      scrollAnchorRef.current.open = true;
+      scrollAnchorRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   };
 
   const inspectN8nExecution = async (id: string) => {
     setSelectedN8nId(id);
-    const exec = await getSalesExecutionStatus(id);
+    const exec = await getSalesExecutionStatus(id, { nodes: true });
     if (!exec) return;
     const nodes = mapRunDataToNodes(exec);
     const synthetic: SalesFunnelExecution = {
@@ -596,7 +583,7 @@ export default function SalesFunnelPage() {
 
   return (
     <div className="page-container animate-fade-in">
-      <PageHeader title="Sales Funnel" subtitle="Launch city-based lead generation campaigns.">
+      <PageHeader title="Campaigns" subtitle="Find schools in a city and send them the first email.">
         <div className="flex items-center gap-2">
           <div
             className={`h-2 w-2 rounded-full ${
@@ -612,42 +599,6 @@ export default function SalesFunnelPage() {
           <span className="text-xs font-medium text-zinc-300 uppercase tracking-wide">{status.text}</span>
         </div>
       </PageHeader>
-
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-        <div className="surface-card stat-card">
-          <div className="flex items-center justify-between">
-            <span className="stat-label">Total Runs</span>
-            <Activity className="w-4 h-4 text-zinc-600" />
-          </div>
-          <span className="stat-value">{executions.length}</span>
-        </div>
-        <div className="surface-card stat-card">
-          <div className="flex items-center justify-between">
-            <span className="stat-label">Success</span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-500/50" />
-          </div>
-          <span className="stat-value text-emerald-400">{successCount}</span>
-        </div>
-        <div className="surface-card stat-card">
-          <div className="flex items-center justify-between">
-            <span className="stat-label">Errors / Waiting</span>
-            <CircleAlert className="w-4 h-4 text-red-500/50" />
-          </div>
-          <span className="stat-value text-red-400">
-            {errorCount}
-            <span className="text-zinc-500 text-sm font-normal"> / {waitingCount}</span>
-          </span>
-        </div>
-        <div className="surface-card stat-card">
-          <div className="flex items-center justify-between">
-            <span className="stat-label">Latest</span>
-            <Target className="w-4 h-4 text-zinc-600" />
-          </div>
-          <span className="text-sm font-medium text-zinc-300 truncate">
-            #{latestRun?.n8nExecutionId?.slice(-8) || latestRun?.id?.slice(-8) || '—'}
-          </span>
-        </div>
-      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="surface-card p-5">
@@ -705,14 +656,63 @@ export default function SalesFunnelPage() {
         </div>
 
         <div className="surface-card p-5">
-          <h3 className="text-sm font-semibold text-zinc-100 mb-4">Live Diagnostics</h3>
-          <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 font-mono text-[11px] leading-relaxed text-zinc-400 h-[150px] overflow-auto whitespace-pre-wrap">
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <h3 className="text-sm font-semibold text-zinc-100">Last run</h3>
+            {latestStatus && <Badge variant={statusBadgeVariant(latestStatus)}>{latestStatus}</Badge>}
+          </div>
+          {latestRun && latestSummary ? (
+            <>
+              <p className="text-[11px] text-zinc-500 mb-3">
+                {latestRun.mode !== 'n8n' && history[0]?.query ? `${history[0].query} · ` : ''}
+                {new Date(latestRun.startedAt).toLocaleString()}
+              </p>
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                {[
+                  { label: 'Schools found', value: latestSummary.found },
+                  { label: 'New in the sheet', value: latestSummary.added },
+                  { label: 'First emails sent', value: latestSummary.emailed },
+                ].map((s) => (
+                  <div key={s.label} className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
+                    <p className="text-[10px] text-zinc-500">{s.label}</p>
+                    <p className="text-lg font-semibold text-zinc-100">{s.value ?? '—'}</p>
+                  </div>
+                ))}
+              </div>
+              {latestSummary.found === undefined && latestRun.n8nExecutionId && !pollingExecutionId && (
+                <button
+                  type="button"
+                  className="mb-3 text-[11px] text-sky-400 hover:underline"
+                  onClick={() => void inspectN8nExecution(latestRun.n8nExecutionId!)}
+                >
+                  Load this run&apos;s numbers from n8n
+                </button>
+              )}
+              {latestSummary.sendFailures && (
+                <p className="mb-3 text-[11px] text-amber-400">Some emails failed to send. The alert email has the error.</p>
+              )}
+            </>
+          ) : recentN8n[0] ? (
+            <p className="text-[11px] text-zinc-500 mb-3">
+              Latest n8n run #{recentN8n[0].id} · {recentN8n[0].status}
+              {recentN8n[0].startedAt ? ` · ${new Date(recentN8n[0].startedAt).toLocaleString()}` : ''} ·{' '}
+              <button type="button" className="text-sky-400 hover:underline" onClick={() => void inspectN8nExecution(recentN8n[0].id)}>
+                Load its numbers
+              </button>
+            </p>
+          ) : (
+            <p className="text-[11px] text-zinc-500 mb-3">No runs yet.</p>
+          )}
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed text-zinc-400 max-h-[90px] overflow-auto whitespace-pre-wrap">
             {resultText || 'Awaiting telemetry...'}
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 mt-6" ref={scrollAnchorRef}>
+      <details className="mt-6" ref={scrollAnchorRef}>
+        <summary className="cursor-pointer select-none text-xs font-medium text-zinc-400 hover:text-zinc-200">
+          Run details: node logs and recent n8n runs
+        </summary>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 mt-4">
         <div className="lg:col-span-8">
           <div className="surface-card p-5">
             <div className="flex items-center justify-between mb-4">
@@ -853,36 +853,9 @@ export default function SalesFunnelPage() {
               )}
             </div>
           </div>
-
-          <div className="surface-card p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <HistoryIcon className="w-4 h-4 text-zinc-400" />
-              <h3 className="text-sm font-semibold text-zinc-100">Conversion History</h3>
-            </div>
-            <div className="space-y-2 max-h-[240px] overflow-y-auto">
-              {history.map((item, index) => (
-                <div
-                  key={index}
-                  className="p-3 rounded-lg bg-zinc-800/40 border border-zinc-800 hover:border-zinc-700 transition-all"
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <p className="text-xs font-medium text-zinc-200">{item.city}</p>
-                    <Badge variant={item.ok ? 'success' : 'danger'} className="text-[9px]">
-                      {item.ok ? 'OK' : 'FAIL'}
-                    </Badge>
-                  </div>
-                  <p className="text-[11px] text-zinc-500 italic mb-2">
-                    &quot;{item.query || 'Generic Search'}&quot;
-                  </p>
-                  <p className="text-[9px] text-zinc-600 text-right">
-                    {new Date(item.time).toLocaleTimeString()}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
+      </details>
 
       <SalesInsightsPanel leads={filteredLeads} onSelectLead={setSelectedLead} />
 
@@ -924,9 +897,9 @@ export default function SalesFunnelPage() {
             className="h-9 text-xs"
           />
           <Input
-            placeholder="Lead_status"
-            value={leadStatusFilter}
-            onChange={(e) => setLeadStatusFilter(e.target.value)}
+            placeholder="Stage (e.g. Engaged)"
+            value={leadStageFilter}
+            onChange={(e) => setLeadStageFilter(e.target.value)}
             className="h-9 text-xs"
           />
         </div>
@@ -1000,85 +973,15 @@ export default function SalesFunnelPage() {
       </div>
 
       {selectedLead && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" onClick={() => setSelectedLead(null)}>
-          <div
-            className="w-full max-w-lg max-h-[80vh] overflow-auto rounded-xl border border-zinc-700 bg-zinc-900 p-5 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between mb-4">
-              <div>
-                <h4 className="text-sm font-semibold text-zinc-100">
-                  {cell(selectedLead, 'School Name') || 'Lead detail'}
-                </h4>
-                <p className="text-[11px] text-zinc-500">{cell(selectedLead, 'City')}</p>
-              </div>
-              <button type="button" className="p-1 text-zinc-500 hover:text-zinc-300" onClick={() => setSelectedLead(null)}>
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <dl className="space-y-2 text-[11px]">
-              {[
-                'Email ID',
-                'Phone number',
-                'Lead_status',
-                'Status',
-                'Reply_Status',
-                'Whatsapp_status',
-                'Whatsapp_message_sid',
-                'whatsapp_sent_at',
-                'whatsapp_replied',
-                'whatsapp_reply_message',
-                'whatsapp_reply_category',
-                'Follow_up_count',
-                'Last_Follow_up',
-                'Next_Follow_up',
-                'XR_status',
-                'Email_template_id',
-                'Email_stage',
-                'Email_sent_at',
-                'Delivered_status',
-                'Opened_status',
-                'Click_count',
-                'Last_Clicked_Button',
-                'Last_Clicked_Template',
-                'Last_Clicked_Stage',
-                'Last_Clicked_at',
-                'Suspected_bot_clicks',
-                'Bounced_status',
-                'Reply_intent',
-                'Reply_confidence',
-                'Reply_snippet',
-                'Whatsapp_reminder_at',
-              ].map((key) => (
-                <div key={key} className="flex gap-3 border-b border-zinc-800/80 pb-1.5">
-                  <dt className="w-40 flex-shrink-0 text-zinc-500">{key}</dt>
-                  <dd className="text-zinc-200 break-all">{cell(selectedLead, key) || '—'}</dd>
-                </div>
-              ))}
-            </dl>
-            {leadPhoneForMessaging(selectedLead) && (
-              <Link
-                to={`/twilio-messaging?contact=${encodeURIComponent(leadPhoneForMessaging(selectedLead)!)}`}
-                className="mt-4 inline-flex text-xs text-sky-400 hover:underline"
-              >
-                Open in Messaging →
-              </Link>
-            )}
-          </div>
-        </div>
+        <LeadDrawer
+          lead={selectedLead}
+          onClose={() => setSelectedLead(null)}
+          onChange={(row) => {
+            replaceLead(row);
+            setSelectedLead(row);
+          }}
+        />
       )}
-
-      <div className="surface-card p-5 mt-6">
-        <h3 className="text-sm font-semibold text-zinc-100 mb-2">Coming next (ops roadmap)</h3>
-        <ul className="grid gap-2 sm:grid-cols-2 text-[11px] text-zinc-500">
-          {OPS_DASHBOARD_ROADMAP.map((item) => (
-            <li key={item.id} className="rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-2">
-              <span className="text-zinc-300 font-medium">{item.title}</span>
-              <span className="block mt-0.5 text-zinc-600">{item.detail}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
     </div>
   );
 }

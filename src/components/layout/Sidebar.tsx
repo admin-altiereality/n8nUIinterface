@@ -6,6 +6,8 @@ import { Tooltip } from '../ui/tooltip';
 import {
   LayoutDashboard,
   Gauge,
+  Home,
+  Columns3,
   Target,
   MessageCircle,
   LogOut,
@@ -29,13 +31,19 @@ const NAV_ITEMS: NavItem[] = [
     roles: ['superadmin', 'associate', 'salesperson', 'whatsapp_manager'],
   },
   {
-    label: 'Builder',
-    path: '/',
-    icon: <LayoutDashboard className="w-5 h-5" />,
-    roles: ['superadmin', 'associate', 'builder'],
+    label: 'Sales Home',
+    path: '/sales',
+    icon: <Home className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
   },
   {
-    label: 'Sales Funnel',
+    label: 'Pipeline',
+    path: '/pipeline',
+    icon: <Columns3 className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Campaigns',
     path: '/sales-funnel',
     icon: <Target className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'salesperson'],
@@ -44,7 +52,13 @@ const NAV_ITEMS: NavItem[] = [
     label: 'Messaging',
     path: '/twilio-messaging',
     icon: <MessageCircle className="w-5 h-5" />,
-    roles: ['superadmin', 'associate', 'whatsapp_manager'],
+    roles: ['superadmin', 'associate', 'salesperson', 'whatsapp_manager'],
+  },
+  {
+    label: 'Builder',
+    path: '/',
+    icon: <LayoutDashboard className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'builder'],
   },
 ];
 

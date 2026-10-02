@@ -46,7 +46,7 @@ const AGENT_ROLES = new Set([
   "whatsapp_manager",
 ]);
 
-const TWILIO_ROLES = new Set(["superadmin", "associate", "whatsapp_manager"]);
+const TWILIO_ROLES = new Set(["superadmin", "associate", "salesperson", "whatsapp_manager"]);
 const N8N_ROLES = new Set(["superadmin", "associate", "builder"]);
 /** Sales Funnel execution polling + Sheets leads (scoped away from full builder n8n access). */
 const SALES_N8N_ROLES = new Set(["superadmin", "associate", "salesperson"]);
@@ -92,7 +92,6 @@ const TWILIO_INBOUND_COLLECTION = "twilioInboundMessages";
 const LEAD_ASSIGNMENTS_COLLECTION = "leadAssignments";
 const OPS_AUDIT_COLLECTION = "opsAuditLog";
 const DEFAULT_WHATSAPP_QUICK_REPLY_TEMPLATE_SID = "HX9fab5aaad062c64423df7a312c84e6af";
-const DEFAULT_QUICK_REPLY_TEMPLATE_NAME = "LearnXR quick reply";
 const MEDIA_SIZE_LIMIT_BYTES = 16 * 1024 * 1024;
 // SVG is excluded: it can carry script and would run on this origin.
 const SUPPORTED_MEDIA_CONTENT_TYPE = /^(image\/(?!svg)|video\/|audio\/|application\/pdf$)/i;
@@ -910,6 +909,15 @@ function buildLeadPatch(body: Record<string, unknown>, auth: AuthedUser): LeadPa
     }
   }
 
+  const event = safeText(body.event);
+  if (event && event !== "no_show") return { error: "invalid_event", field: "event" };
+  if (event === "no_show") {
+    // A missed demo goes back to Engaged so it is rebooked rather than left in "Demo booked".
+    fields.Stage = "Engaged";
+    fields.Next_step = "Rebook the demo (they missed it)";
+    fields.Next_step_due = now;
+  }
+
   if (fields.Stage === "Lost" && !fields.Lost_reason) return { error: "lost_reason_required", field: "Lost_reason" };
   if (["call", "whatsapp", "email"].includes(safeText(body.touch))) fields.First_touch_at = now;
   return { fields, ifOwnerIn };
@@ -1253,6 +1261,26 @@ app.get("/api/n8n/sales-executions", requireRoles(SALES_N8N_ROLES), async (req, 
   }
 });
 
+/** Keeps what the Campaigns page shows per node (timing, errors, item counts) and drops the item payloads. */
+function slimRunData(data: unknown): Record<string, unknown> {
+  const resultData = ((data as { resultData?: Record<string, unknown> } | undefined)?.resultData || {}) as Record<string, unknown>;
+  const runData = (resultData.runData || {}) as Record<string, Array<Record<string, unknown>>>;
+  const slim: Record<string, unknown[]> = {};
+  for (const [node, runs] of Object.entries(runData)) {
+    slim[node] = (Array.isArray(runs) ? runs : []).map((run) => {
+      const main = ((run.data as { main?: unknown[] } | undefined)?.main || []) as unknown[];
+      const error = run.error as { message?: string } | undefined;
+      return {
+        startTime: run.startTime,
+        executionTime: run.executionTime,
+        ...(error ? { error: { message: safeText(error.message) } } : {}),
+        data: { main: main.map((items) => new Array(Array.isArray(items) ? items.length : 0).fill(0)) },
+      };
+    });
+  }
+  return { resultData: { runData: slim } };
+}
+
 app.get("/api/n8n/sales-executions/:id", requireRoles(SALES_N8N_ROLES), async (req, res) => {
   const { apiUrl, apiKey } = getN8nConfig();
   if (!apiUrl || !apiKey) {
@@ -1260,8 +1288,11 @@ app.get("/api/n8n/sales-executions/:id", requireRoles(SALES_N8N_ROLES), async (r
   }
 
   const id = req.params.id;
+  // A funnel run's data runs to several MB (it holds every fetched web page), so it is only loaded
+  // when node counts are asked for, and only the counts leave this function.
+  const withNodes = req.query.nodes === "1";
   const base = apiUrl.replace(/\/$/, "");
-  const url = `${base}/api/v1/executions/${encodeURIComponent(id)}?includeData=true`;
+  const url = `${base}/api/v1/executions/${encodeURIComponent(id)}?includeData=${withNodes}`;
 
   try {
     const upstream = await fetch(url, { headers: { "X-N8N-API-KEY": apiKey } });
@@ -1292,7 +1323,11 @@ app.get("/api/n8n/sales-executions/:id", requireRoles(SALES_N8N_ROLES), async (r
     if (wfId && wfId !== SALES_FUNNEL_WORKFLOW_ID) {
       return res.status(403).json({ message: "Forbidden: execution is not a sales funnel run." });
     }
-    return res.status(upstream.status).json(data);
+    const execution: Record<string, unknown> = { ...data };
+    delete execution.workflowData;
+    delete execution.data;
+    if (withNodes) execution.data = slimRunData(data.data);
+    return res.status(upstream.status).json(execution);
   } catch (err) {
     logger.error("n8n sales execution detail proxy failed", err);
     const fallback = await getStoredSalesExecution(id);
@@ -1602,20 +1637,56 @@ app.get("/api/twilio/health", requireRoles(TWILIO_ROLES), (_req, res) => {
   });
 });
 
-app.get("/api/twilio/templates", requireRoles(TWILIO_ROLES), (_req, res) => {
-  return res.json({
-    templates: [
-      {
-        sid: DEFAULT_WHATSAPP_QUICK_REPLY_TEMPLATE_SID,
-        name: DEFAULT_QUICK_REPLY_TEMPLATE_NAME,
-        channel: "whatsapp",
-        mediaType: "text",
-        contentType: "twilio/quick-reply",
-        variables: {},
-        isDefault: true,
-      },
-    ],
+type ContentApiItem = {
+  sid?: string;
+  friendly_name?: string;
+  language?: string;
+  variables?: Record<string, string>;
+  types?: Record<string, { body?: string }>;
+  approval_requests?: { status?: string; category?: string };
+};
+
+const TEMPLATE_CACHE_MS = 10 * 60_000;
+let templateCache: { at: number; templates: Array<Record<string, unknown>> } | null = null;
+
+/** Approved WhatsApp templates from Twilio's Content API, cached for 10 minutes. */
+async function listApprovedTemplates(t: { accountSid: string; authToken: string }): Promise<Array<Record<string, unknown>>> {
+  if (templateCache && Date.now() - templateCache.at < TEMPLATE_CACHE_MS) return templateCache.templates;
+  const apiRes = await fetch("https://content.twilio.com/v1/ContentAndApprovals?PageSize=500", {
+    headers: { Authorization: twilioBasicAuthHeader(t.accountSid, t.authToken) },
   });
+  if (!apiRes.ok) throw new Error(`Twilio Content API returned ${apiRes.status}`);
+  const data = (await apiRes.json()) as { contents?: ContentApiItem[] };
+  const templates = (data.contents || [])
+    .filter((c) => c.sid && c.approval_requests?.status === "approved")
+    .map((c) => {
+      const [contentType, type] = Object.entries(c.types || {})[0] || ["", {}];
+      return {
+        sid: c.sid,
+        name: c.friendly_name || c.sid,
+        channel: "whatsapp",
+        language: c.language || "",
+        category: c.approval_requests?.category || "",
+        contentType,
+        body: type.body || "",
+        variableKeys: Object.keys(c.variables || {}).sort((a, b) => Number(a) - Number(b)),
+        variables: c.variables || {},
+        isDefault: c.sid === DEFAULT_WHATSAPP_QUICK_REPLY_TEMPLATE_SID,
+      };
+    });
+  templateCache = { at: Date.now(), templates };
+  return templates;
+}
+
+app.get("/api/twilio/templates", requireRoles(TWILIO_ROLES), async (_req, res) => {
+  const t = getTwilioConfig();
+  if (!t.ok) return res.status(503).json({ message: "Twilio is not configured on this function." });
+  try {
+    return res.json({ templates: await listApprovedTemplates(t) });
+  } catch (err) {
+    logger.warn("Twilio template list failed", err);
+    return res.status(502).json({ message: "Could not load WhatsApp templates from Twilio." });
+  }
 });
 
 app.get("/api/twilio/send-diagnostics", requireRoles(TWILIO_ROLES), async (req, res) => {
@@ -2019,7 +2090,7 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
   const templateSid = requestedTemplateSid;
   let diagnosticId: string | null = null;
 
-  if (!to || (!hasBody && !hasMedia)) {
+  if (!to || (!hasBody && !hasMedia && !templateSid)) {
     diagnosticId = await writeTwilioDiagnostic({
       phase: "validation",
       status: "failed",
@@ -2030,7 +2101,7 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
       twilioMessage: "Missing required fields",
     });
     return res.status(400).json({
-      message: `Missing required fields (Twilio send): toPresent=${Boolean(to)} hasBody=${hasBody} hasMedia=${hasMedia}`,
+      message: `Missing required fields (Twilio send): toPresent=${Boolean(to)} hasBody=${hasBody} hasMedia=${hasMedia} hasTemplate=${Boolean(templateSid)}`,
       phase: "validation",
       diagnosticId,
     });
@@ -2110,11 +2181,8 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
 
   const statusCallback = `${getPublicApiBase(req)}/api/twilio/status`;
   const publicMediaUrl = hasMedia ? getPublicMediaUrl(req, mediaUrl, mediaFilename) : "";
+  // Each template declares its own variables; the sender fills them, so nothing is guessed here.
   const templateVariables = readTemplateVariables(req.body?.templateVariables);
-  if (hasMedia && !templateVariables["1"]) templateVariables["1"] = publicMediaUrl;
-  if (hasMedia && !templateVariables["2"]) templateVariables["2"] = mediaFilename;
-  if (hasMedia && !templateVariables["3"]) templateVariables["3"] = bodyText.trim() || `Please review ${mediaFilename}.`;
-  else if (hasBody && !templateVariables["3"]) templateVariables["3"] = bodyText.trim();
 
   diagnosticId = await writeTwilioDiagnostic({
     phase: "attempt",
@@ -2322,6 +2390,7 @@ app.patch("/api/leads/:leadId", requireRoles(SHEETS_ROLES), async (req, res) => 
       result = await updateLeadInSheet(leadId, patch.fields, { email: auth.email, role: auth.role }, patch.ifOwnerIn);
       if (result.status !== 200) return res.status(result.status).json(result.body);
       await writeOpsAudit({ action: "lead.update", auth, targetId: leadId, details: { fields: patch.fields } });
+      if (body.event === "no_show") await forwardSalesEvent({ type: "demo_no_show", leadId });
     }
     // Notes live in the audit log so a lead's activity is one feed.
     if (note) await writeOpsAudit({ action: "lead.note", auth, targetId: leadId, details: { text: note } });

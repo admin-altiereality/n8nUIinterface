@@ -15,7 +15,7 @@ interface ProtectedRouteProps {
  */
 function getDefaultPageForRole(role: UserRole): string {
   switch (role) {
-    case 'salesperson': return '/sales-funnel';
+    case 'salesperson': return '/sales';
     case 'whatsapp_manager': return '/twilio-messaging';
     case 'builder': return '/';
     case 'superadmin': return '/';

@@ -6,8 +6,9 @@
  * `Email_template_id` by the first-email template assignment.
  */
 import type { SchoolLeadRow } from '../api/sheetsClient';
+import { STAGES, stageOf } from './pipeline';
 
-export type Intent = 'demo' | 'pricing' | 'whatsapp' | 'website' | 'video';
+export type Intent = 'demo' | 'pricing' | 'whatsapp' | 'try' | 'website' | 'video';
 
 /** Mirrors TEMPLATES in the n8n "Assign Email Template" node. */
 export const EMAIL_TEMPLATE_LABELS: Record<string, string> = {
@@ -18,13 +19,21 @@ export const EMAIL_TEMPLATE_LABELS: Record<string, string> = {
   t00_legacy: 'Sent before template tracking',
 };
 
-const INTENT_FLAGS: Array<{ intent: Intent; column: string; button: string; weight: number; label: string }> = [
-  { intent: 'demo', column: 'Clicked_Demo', button: 'btn_demo', weight: 5, label: 'Demo' },
-  { intent: 'pricing', column: 'Clicked_Pricing', button: 'btn_pricing', weight: 4, label: 'Pricing' },
-  { intent: 'whatsapp', column: 'Clicked_WhatsApp', button: 'btn_whatsapp', weight: 4, label: 'WhatsApp' },
-  { intent: 'website', column: 'Clicked_Website', button: 'btn_website', weight: 3, label: 'Website' },
+/**
+ * One entry per clickable intent. `column`/`button` are the v2 click flags; `tracked` is the button name
+ * the v3 click tracker adds to the comma-separated `Clicked_buttons` set.
+ */
+const INTENT_FLAGS: Array<{ intent: Intent; column?: string; button?: string; tracked?: string; weight: number; label: string }> = [
+  { intent: 'demo', column: 'Clicked_Demo', button: 'btn_demo', tracked: 'demo', weight: 5, label: 'Demo' },
+  { intent: 'pricing', column: 'Clicked_Pricing', button: 'btn_pricing', tracked: 'pricing', weight: 4, label: 'Pricing' },
+  { intent: 'whatsapp', column: 'Clicked_WhatsApp', button: 'btn_whatsapp', tracked: 'wa', weight: 4, label: 'WhatsApp' },
+  { intent: 'try', tracked: 'try', weight: 3, label: 'Try a lesson' },
+  { intent: 'website', column: 'Clicked_Website', button: 'btn_website', tracked: 'site', weight: 2, label: 'Website' },
   { intent: 'video', column: 'Clicked_HowLearnXR', button: 'btn_how_learnxr', weight: 2, label: 'Video' },
 ];
+
+/** Reply intents worth more than a plain reply (any other human reply scores 2; auto-replies score nothing). */
+const REPLY_WEIGHTS: Record<string, number> = { demo: 8, pricing: 7, positive: 6, question: 4 };
 
 export const INTENT_LABELS: Record<Intent, string> = Object.fromEntries(
   INTENT_FLAGS.map((f) => [f.intent, f.label])
@@ -58,7 +67,7 @@ export function isBounced(row: SchoolLeadRow): boolean {
 }
 
 export function hasReplied(row: SchoolLeadRow): boolean {
-  return /replied/i.test(str(row, 'Reply_Status')) || truthy(row, 'whatsapp_replied');
+  return time(row, 'Replied_at') !== null || /replied/i.test(str(row, 'Reply_Status')) || truthy(row, 'whatsapp_replied');
 }
 
 export function isEmailed(row: SchoolLeadRow): boolean {
@@ -75,18 +84,24 @@ export interface LeadScore {
 }
 
 /**
- * Interest score: intent weights for every button clicked, +1 per extra click,
- * +6 for a positive/demo/pricing reply, decayed with a 14-day half-life since the
- * last engagement. Bounced, dropped or negative leads score 0.
+ * Interest score: intent weights for every button clicked (demo 5, pricing 4, WhatsApp 4, try 3,
+ * website 2, video 2), +1 per extra click, plus the reply (demo 8, pricing 7, positive 6, question 4,
+ * any other human reply 2), decayed with a 14-day half-life since the last engagement.
+ * Bounced, do-not-contact and Lost leads score 0.
  */
 export function scoreLead(row: SchoolLeadRow, now = Date.now()): LeadScore {
   const intents: Intent[] = [];
   const reasons: string[] = [];
   const lastButton = str(row, 'Last_Clicked_Button');
+  const tracked = new Set(str(row, 'Clicked_buttons').toLowerCase().split(',').map((b) => b.trim()));
   let raw = 0;
 
   for (const flag of INTENT_FLAGS) {
-    if (truthy(row, flag.column) || lastButton === flag.button) {
+    const clicked =
+      (flag.column && truthy(row, flag.column)) ||
+      (flag.button && lastButton === flag.button) ||
+      (flag.tracked && tracked.has(flag.tracked));
+    if (clicked) {
       intents.push(flag.intent);
       raw += flag.weight;
     }
@@ -97,10 +112,10 @@ export function scoreLead(row: SchoolLeadRow, now = Date.now()): LeadScore {
   if (intents.length) reasons.push(`clicked ${intents.map((i) => INTENT_LABELS[i]).join(', ')}`);
 
   const replyIntent = str(row, 'Reply_intent').toLowerCase();
-  if (['positive', 'demo', 'pricing'].includes(replyIntent)) {
-    raw += 6;
+  if (REPLY_WEIGHTS[replyIntent]) {
+    raw += REPLY_WEIGHTS[replyIntent];
     reasons.push(`replied: ${replyIntent}`);
-  } else if (hasReplied(row)) {
+  } else if (hasReplied(row) && replyIntent !== 'auto_reply') {
     raw += 2;
     reasons.push('replied');
   }
@@ -113,10 +128,7 @@ export function scoreLead(row: SchoolLeadRow, now = Date.now()): LeadScore {
     raw *= Math.pow(0.5, days / HALF_LIFE_DAYS);
   }
 
-  const dead =
-    isBounced(row) ||
-    replyIntent === 'negative' ||
-    /drop/i.test(str(row, 'Lead_status'));
+  const dead = isBounced(row) || Boolean(str(row, 'Do_not_contact')) || stageOf(row) === 'Lost';
   return { row, score: dead ? 0 : Math.round(raw * 10) / 10, intents, reasons, lastClickAt };
 }
 
@@ -207,16 +219,17 @@ export function templateStats(rows: SchoolLeadRow[]): TemplateStat[] {
 
 export interface CityFunnel {
   city: string;
-  scraped: number;
-  emailed: number;
-  opened: number;
-  clicked: number;
+  leads: number;
+  contacted: number;
   replied: number;
-  whatsapp: number;
+  demos: number;
+  won: number;
   hot: number;
 }
 
-/** Per city: scraped → emailed → opened → clicked → replied, plus WhatsApp sends and hot leads. */
+const DEMO_STAGE_INDEX = STAGES.indexOf('Demo booked');
+
+/** Per city: leads → contacted → replied → demo booked → won, plus how many are hot right now. */
 export function cityFunnels(rows: SchoolLeadRow[], now = Date.now()): CityFunnel[] {
   const by = new Map<string, CityFunnel>();
   for (const row of rows) {
@@ -224,18 +237,16 @@ export function cityFunnels(rows: SchoolLeadRow[], now = Date.now()): CityFunnel
     const key = city.toLowerCase();
     let c = by.get(key);
     if (!c) {
-      c = { city, scraped: 0, emailed: 0, opened: 0, clicked: 0, replied: 0, whatsapp: 0, hot: 0 };
+      c = { city, leads: 0, contacted: 0, replied: 0, demos: 0, won: 0, hot: 0 };
       by.set(key, c);
     }
-    c.scraped += 1;
-    if (isEmailed(row)) c.emailed += 1;
-    if (truthy(row, 'Opened_status')) c.opened += 1;
-    if (num(row, 'Click_count') > 0) c.clicked += 1;
+    const stage = stageOf(row);
+    c.leads += 1;
+    if (stage !== 'New') c.contacted += 1;
     if (hasReplied(row)) c.replied += 1;
-    if (str(row, 'Whatsapp_message_sid').startsWith('SM') || /sent|queued|delivered|read/i.test(str(row, 'Whatsapp_status'))) {
-      c.whatsapp += 1;
-    }
+    if (time(row, 'Demo_booked_at') !== null || (stage !== 'Lost' && STAGES.indexOf(stage) >= DEMO_STAGE_INDEX)) c.demos += 1;
+    if (stage === 'Won') c.won += 1;
     if (scoreLead(row, now).score >= 4) c.hot += 1;
   }
-  return [...by.values()].sort((a, b) => b.hot - a.hot || b.clicked - a.clicked || b.scraped - a.scraped);
+  return [...by.values()].sort((a, b) => b.won - a.won || b.demos - a.demos || b.hot - a.hot || b.leads - a.leads);
 }
