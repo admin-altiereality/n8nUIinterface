@@ -54,7 +54,9 @@ const SHEETS_ROLES = new Set(["superadmin", "associate", "salesperson"]);
 const OPS_ROLES = new Set(["superadmin", "associate", "salesperson", "whatsapp_manager"]);
 
 const SALES_FUNNEL_WORKFLOW_ID =
-  process.env.N8N_SALES_WORKFLOW_ID || "sLk0CAalsSlR5z4P";
+  process.env.N8N_SALES_WORKFLOW_ID || "6pBPEDzIfj8939GG";
+/** The funnel before "Sales • Scrape & Qualify v3"; its past runs stay viewable. */
+const LEGACY_SALES_WORKFLOW_ID = "sLk0CAalsSlR5z4P";
 const N8N_WEBHOOK_BASE = (process.env.N8N_WEBHOOK_BASE || "https://n8n.altiereality.com/webhook").replace(/\/$/, "");
 const SHEET_CACHE_MS = 60_000;
 
@@ -1320,7 +1322,7 @@ app.get("/api/n8n/sales-executions/:id", requireRoles(SALES_N8N_ROLES), async (r
     const wfId =
       (typeof data.workflowId === "string" && data.workflowId) ||
       (workflowData && typeof workflowData.id === "string" ? workflowData.id : null);
-    if (wfId && wfId !== SALES_FUNNEL_WORKFLOW_ID) {
+    if (wfId && wfId !== SALES_FUNNEL_WORKFLOW_ID && wfId !== LEGACY_SALES_WORKFLOW_ID) {
       return res.status(403).json({ message: "Forbidden: execution is not a sales funnel run." });
     }
     const execution: Record<string, unknown> = { ...data };
@@ -2353,8 +2355,8 @@ app.post("/api/sales/city-runs", requireRoles(SALES_N8N_ROLES), async (req, res)
   if (!queryPrefix) return res.status(400).json({ error: "invalid_preset" });
 
   try {
-    const { status, data } = await callN8nWebhook("city-scrape-start", {
-      query: { city, queryPrefix, query: `${queryPrefix} ${city}`, startedAt: new Date().toISOString() },
+    const { status, data } = await callN8nWebhook("city-scrape-start-v3", {
+      query: { city, preset, queryPrefix, query: `${queryPrefix} ${city}`, startedAt: new Date().toISOString() },
       timeoutMs: 15_000,
     });
     const result = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;

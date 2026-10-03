@@ -18,6 +18,7 @@ import {
   type SalesFunnelExecutionStatus,
   type SalesFunnelHistoryItem,
   type SalesFunnelLogEntry,
+  type SalesRunCounts,
 } from '../lib/salesFunnelRepository';
 import { getCurrentAuthUser, isFirebaseConfigured } from '../lib/firebase';
 import {
@@ -51,7 +52,7 @@ const CITY_RUN_PRESETS: Array<{ value: CityRunPreset; label: string }> = [
 ];
 
 const SALES_WORKFLOW_ID =
-  (import.meta.env.VITE_N8N_SALES_WORKFLOW_ID as string | undefined) || 'sLk0CAalsSlR5z4P';
+  (import.meta.env.VITE_N8N_SALES_WORKFLOW_ID as string | undefined) || '6pBPEDzIfj8939GG';
 
 /** Status-only polls are cheap; node counts are fetched once, when the run finishes. */
 const POLL_INTERVAL_MS = 5000;
@@ -147,8 +148,26 @@ function cell(row: SchoolLeadRow, key: string): string {
   return String(v);
 }
 
-/** What a funnel run did, read from its node outputs (known once the run has been watched or inspected). */
+/** The v3 scraper records its numbers on the execution (custom data); undefined for runs that don't. */
+function countsFrom(exec: N8nExecution | null): SalesRunCounts | undefined {
+  const data = exec?.customData;
+  if (!data || data.found === undefined) return undefined;
+  const num = (value?: string) => Number(value) || 0;
+  return {
+    found: num(data.unique ?? data.found),
+    added: num(data.added),
+    emailed: num(data.emailed),
+    emailFailed: num(data.email_failed),
+  };
+}
+
+/** What a funnel run did (known once the run has been watched or inspected). */
 function runSummary(run: SalesFunnelExecution) {
+  if (run.counts) {
+    const { found, added, emailed, emailFailed } = run.counts;
+    return { found, added, emailed, sendFailures: emailFailed > 0 };
+  }
+  // Runs of the old funnel workflow: read its node outputs.
   const output = (name: string) => run.nodes.find((n) => n.name === name)?.itemsOutput;
   return {
     found: output('Split Out'),
@@ -364,6 +383,7 @@ export default function SalesFunnelPage() {
         // One full fetch at the end gives each node's counts for the run summary.
         const full = await getSalesExecutionStatus(pollingExecutionId, { nodes: true });
         const nodes = mapRunDataToNodes(full || exec);
+        const counts = countsFrom(full);
         const finalStatus: SalesFunnelExecutionStatus = exec.status === 'error' ? 'error' : 'success';
         if (runId) {
           patchExecution(runId, {
@@ -371,6 +391,7 @@ export default function SalesFunnelPage() {
             stoppedAt: exec.stoppedAt || new Date().toISOString(),
             nodes,
             n8nExecutionId: exec.id,
+            counts,
           });
           if (firebaseEnabled) {
             await updateSalesFunnelRun(runId, {
@@ -379,6 +400,7 @@ export default function SalesFunnelPage() {
               ok: finalStatus === 'success',
               nodes,
               n8nExecutionId: exec.id,
+              ...(counts ? { counts } : {}), // Firestore rejects undefined fields
             });
           }
         }
@@ -560,6 +582,7 @@ export default function SalesFunnelPage() {
       stoppedAt: exec.stoppedAt,
       nodes,
       n8nExecutionId: id,
+      counts: countsFrom(exec),
     };
     setExecutions((prev) => {
       const without = prev.filter((e) => e.n8nExecutionId !== id && e.id !== synthetic.id);

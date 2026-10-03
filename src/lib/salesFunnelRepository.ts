@@ -23,6 +23,14 @@ export interface SalesFunnelExecutionNode {
   itemsOutput: number;
 }
 
+/** What a run did, as the v3 scraper records it on the n8n execution. Older runs only have node counts. */
+export interface SalesRunCounts {
+  found: number;
+  added: number;
+  emailed: number;
+  emailFailed: number;
+}
+
 export interface SalesFunnelExecution {
   id: string;
   status: SalesFunnelExecutionStatus;
@@ -32,6 +40,7 @@ export interface SalesFunnelExecution {
   nodes: SalesFunnelExecutionNode[];
   /** Real n8n execution id when available */
   n8nExecutionId?: string;
+  counts?: SalesRunCounts;
 }
 
 export interface SalesFunnelHistoryItem {
@@ -162,6 +171,7 @@ export async function fetchRecentSalesFunnelRuns(limitCount: number): Promise<
       stoppedAt,
       nodes,
       n8nExecutionId: data.n8nExecutionId ? String(data.n8nExecutionId) : undefined,
+      counts: data.counts && typeof data.counts === 'object' ? (data.counts as SalesRunCounts) : undefined,
     };
 
     const history: SalesFunnelHistoryItem = {
@@ -279,6 +289,7 @@ export async function updateSalesFunnelRun(
     nodes?: SalesFunnelExecutionNode[];
     n8nExecutionId?: string;
     responseBody?: string;
+    counts?: SalesRunCounts;
   }
 ): Promise<void> {
   if (!isFirebaseConfigured()) return;

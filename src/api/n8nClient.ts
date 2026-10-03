@@ -29,6 +29,8 @@ export interface N8nExecution {
   status: 'running' | 'success' | 'error' | 'waiting';
   startedAt: string;
   stoppedAt?: string;
+  /** Key-value strings a workflow records about its run (only returned with node data). */
+  customData?: Record<string, string>;
   data?: {
     resultData?: {
       runData?: Record<string, Array<{
