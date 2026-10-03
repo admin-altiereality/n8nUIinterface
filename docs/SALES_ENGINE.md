@@ -66,12 +66,15 @@ Every webhook needs the `X-Altie-Key` header (n8n credential "Altie Function Key
 
 ### One-time Meta setup (owner: you)
 
-1. **Ad account and Page** (picked 2026-10-03): ad account `784451571902986` ("Gaurav Purbia", INR) with the
-   **Altie Reality** Page `112468273892432`.
-   - This is the account that ran the past LearnXR Instagram boosts, and it is the only one with a Page linked. The
-     altie_reality business accounts are "(Read-Only)" with no Page.
-   - In Business Settings, connect the LearnXR Instagram professional account to the Altie Reality Page (Page →
-     Linked accounts → Instagram). The Meta tools currently see no Instagram account on this ad account.
+1. **Ad account, Page and Instagram** (decided 2026-10-03): business ad account `1210737851250614` (altie_reality,
+   INR), the **Altie Reality** Page `112468273892432`, and Instagram **@learn__xr** `17841455631811431`. All three are
+   owned by the altie_reality business, which the system-user token requires.
+   - @learn__xr is already linked to the Altie Reality Page. Its only connected ad account is a closed LeadsBridge
+     account.
+   - Business settings → Ad accounts → `1210737851250614` → give yourself **Full control**; it is "(Read-Only)" today.
+     Then use **Connect assets** to add the Altie Reality Page and @learn__xr.
+   - Business settings → Integrations → **ads MCP server**: allow @learn__xr and the ad account, so Claude can read the
+     posts.
 2. **developers.facebook.com → Create app (Business)**
    - Add **Marketing API** and **Webhooks**. Note the **App secret**.
 3. **Business Settings → System users → Add** (Admin)

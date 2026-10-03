@@ -5,9 +5,9 @@
 import { createHmac, timingSafeEqual } from "crypto";
 
 export const META_GRAPH_VERSION = "v26.0";
-/** "Gaurav Purbia" (INR): the account that runs the LearnXR Instagram ads and promotes the Altie Reality Page. */
-export const META_AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID || "784451571902986";
-/** The Altie Reality Facebook Page; its Instagram account is looked up from it. */
+/** altie_reality business (INR). Business-owned, so the system-user token can use it with @learn__xr. */
+export const META_AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID || "1210737851250614";
+/** The Altie Reality Facebook Page; @learn__xr (17841455631811431) is linked to it and looked up from it. */
 export const META_PAGE_ID = process.env.META_PAGE_ID || "112468273892432";
 /** Highest daily budget the dashboard may set on one ad set, in rupees. */
 export const META_MAX_DAILY_BUDGET_INR = Number(process.env.META_MAX_DAILY_BUDGET_INR || 2000);
