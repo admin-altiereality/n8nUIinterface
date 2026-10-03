@@ -16,6 +16,7 @@ import {
   Zap,
   Megaphone,
   Settings,
+  Users,
 } from 'lucide-react';
 
 interface NavItem {
@@ -42,6 +43,12 @@ const NAV_ITEMS: NavItem[] = [
     label: 'Pipeline',
     path: '/pipeline',
     icon: <Columns3 className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Team',
+    path: '/team',
+    icon: <Users className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'salesperson'],
   },
   {

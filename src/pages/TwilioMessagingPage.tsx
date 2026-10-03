@@ -21,6 +21,7 @@ import { Avatar } from '../components/ui/avatar';
 import { useAuth } from '../context/AuthContext';
 import type { SchoolLeadRow } from '../api/sheetsClient';
 import { useSheetLeads } from '../lib/useSheetLeads';
+import { useAppSettings } from '../lib/useAppSettings';
 import { useLeadUpdate } from '../lib/useLeadUpdate';
 import { BOOKING_URL, WHATSAPP_WINDOW_MS, bookingLink, field, ownerLabel, stageOf, whatsappWindowLeftMs } from '../lib/pipeline';
 import {
@@ -264,6 +265,7 @@ function attachmentKind(file: File): string {
 export default function TwilioMessagingPage() {
   const [searchParams] = useSearchParams();
   const [health, setHealth] = useState<TwilioHealth>({ ok: false, accountHint: null });
+  const appSettings = useAppSettings();
   const [messages, setMessages] = useState<TwilioMessage[]>([]);
   const [nextPageToken, setNextPageToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -535,6 +537,13 @@ export default function TwilioMessagingPage() {
       }`,
     },
     { label: 'Ask for a call time', text: 'Thanks for your interest in LearnXR! When is a good time for a quick call?' },
+    // Team templates from Admin → Settings; {{name}} and {{school}} are filled from the lead.
+    ...(appSettings?.replyTemplates || []).map((t) => ({
+      label: t.title,
+      text: t.body
+        .replace(/\{\{\s*name\s*\}\}/gi, (activeLead && field(activeLead, 'Principal Name')) || 'there')
+        .replace(/\{\{\s*school\s*\}\}/gi, (activeLead && field(activeLead, 'School Name')) || 'your school'),
+    })),
   ];
 
   const selectTemplate = (sid: string) => {

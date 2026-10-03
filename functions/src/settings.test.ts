@@ -38,6 +38,13 @@ describe('applySettingsPatch', () => {
     expect(applySettingsPatch(DEFAULT_SETTINGS, { followUpMax: 30 })).toMatch(/more than the daily email cap/);
   });
 
+  it('accepts valid reply templates and rejects bad ones', () => {
+    const ok = applySettingsPatch(DEFAULT_SETTINGS, { replyTemplates: [{ title: 'Pricing', body: 'Our plans start at…' }] });
+    expect(typeof ok !== 'string' && ok.replyTemplates).toEqual([{ title: 'Pricing', body: 'Our plans start at…' }]);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { replyTemplates: [{ title: '', body: 'x' }] })).toMatch(/Templates need/);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { replyTemplates: 'nope' })).toMatch(/Templates need/);
+  });
+
   it('reports which keys changed', () => {
     const next = applySettingsPatch(DEFAULT_SETTINGS, { dailyEmailCap: 25 });
     expect(typeof next !== 'string' && changedKeys(DEFAULT_SETTINGS, next)).toEqual(['dailyEmailCap']);

@@ -8,7 +8,8 @@ import { Label } from '../ui/label';
 import { Select } from '../ui/select';
 import { Textarea } from '../ui/textarea';
 import { useAuth } from '../../context/AuthContext';
-import { fetchLeadActivity, type LeadActivityItem } from '../../api/opsClient';
+import { CALL_OUTCOMES, fetchLeadActivity, type CallOutcome, type LeadActivityItem } from '../../api/opsClient';
+import { useAppSettings } from '../../lib/useAppSettings';
 import { leadPhoneForMessaging, type SchoolLeadRow } from '../../api/sheetsClient';
 import {
   LOST_REASONS,
@@ -74,6 +75,9 @@ function formFrom(lead: SchoolLeadRow): Form {
 /** One line per activity item, or null for entries that only repeat another (a call's touch stamp sits next to its note). */
 function describeActivity(item: LeadActivityItem): string | null {
   if (item.action === 'lead.note') return String(item.details.text || '');
+  if (item.action === 'lead.call') {
+    return `Call: ${String(item.details.outcome || '')}${item.details.notes ? ` — ${String(item.details.notes)}` : ''}`;
+  }
   if (item.action !== 'lead.update') return item.action;
   const fields = (item.details.fields || {}) as Record<string, string>;
   if ('First_touch_at' in fields && Object.keys(fields).length === 1) return null;
@@ -94,6 +98,8 @@ export function LeadDrawer({ lead, onClose, onChange }: Props) {
   const { update, busy, error, setError } = useLeadUpdate(onChange);
   const [form, setForm] = useState<Form>(() => formFrom(lead));
   const [note, setNote] = useState('');
+  const [callOutcome, setCallOutcome] = useState<CallOutcome>('Interested');
+  const settings = useAppSettings();
   const [info, setInfo] = useState<string | null>(null);
   const [activity, setActivity] = useState<LeadActivityItem[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
@@ -151,6 +157,26 @@ export function LeadDrawer({ lead, onClose, onChange }: Props) {
 
   const save = async () => {
     if (await run({ fields: changes }, changes)) setInfo('Saved');
+  };
+
+  // The note box doubles as call notes, so one text field covers both.
+  const logCall = async () => {
+    const notes = note.trim();
+    if (await run({ touch: 'call', call: { outcome: callOutcome, notes } }, {}, 'logcall')) {
+      setNote('');
+      setInfo(`Call logged: ${callOutcome}`);
+    }
+  };
+
+  const copyTemplate = async (body: string) => {
+    const name = field(lead, 'Principal Name');
+    const text = body.replace(/\{\{\s*name\s*\}\}/gi, name || 'there').replace(/\{\{\s*school\s*\}\}/gi, field(lead, 'School Name'));
+    try {
+      await navigator.clipboard.writeText(text);
+      setInfo('Template copied');
+    } catch {
+      setNote(text);
+    }
   };
 
   const addNote = async () => {
@@ -382,9 +408,41 @@ export function LeadDrawer({ lead, onClose, onChange }: Props) {
               value={note}
               onChange={(e) => setNote(e.target.value)}
             />
-            <Button size="sm" variant="secondary" disabled={!note.trim() || !leadId || Boolean(busy)} onClick={() => void addNote()}>
-              {isBusy('note') && <Loader2 className="h-3 w-3 animate-spin" />} Add note
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="secondary" disabled={!note.trim() || !leadId || Boolean(busy)} onClick={() => void addNote()}>
+                {isBusy('note') && <Loader2 className="h-3 w-3 animate-spin" />} Add note
+              </Button>
+              <span className="text-[10px] text-zinc-600">or log a call:</span>
+              <select
+                value={callOutcome}
+                onChange={(e) => setCallOutcome(e.target.value as CallOutcome)}
+                className="h-8 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-100"
+                aria-label="Call outcome"
+              >
+                {CALL_OUTCOMES.map((o) => (
+                  <option key={o} value={o}>{o}</option>
+                ))}
+              </select>
+              <Button size="sm" variant="outline" disabled={!leadId || Boolean(busy)} onClick={() => void logCall()}>
+                {isBusy('logcall') ? <Loader2 className="h-3 w-3 animate-spin" /> : <Phone className="h-3 w-3" />} Log call
+              </Button>
+            </div>
+            {!!settings?.replyTemplates.length && (
+              <select
+                value=""
+                onChange={(e) => {
+                  const t = settings.replyTemplates[Number(e.target.value)];
+                  if (t) void copyTemplate(t.body);
+                }}
+                className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-300"
+                aria-label="Copy a reply template"
+              >
+                <option value="">Copy a reply template…</option>
+                {settings.replyTemplates.map((t, i) => (
+                  <option key={t.title} value={i}>{t.title}</option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div>

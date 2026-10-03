@@ -247,6 +247,39 @@ export default function AdminPage() {
                 <Input value={recipients} onChange={(e) => setRecipients(e.target.value)} />
               </Field>
             </div>
+
+            <div className="space-y-3 lg:col-span-2">
+              <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">Reply templates</h3>
+              <p className="text-[10px] text-zinc-500">
+                Shown as quick replies in Messaging and in the lead drawer. Use {'{{name}}'} and {'{{school}}'} to fill in the contact. Free-text WhatsApp only works within 24 hours of
+                the school's last message.
+              </p>
+              {draft.replyTemplates.map((t, i) => (
+                <div key={i} className="grid gap-2 rounded-lg border border-zinc-800 p-3 md:grid-cols-[200px_1fr_auto]">
+                  <Input
+                    placeholder="Title"
+                    value={t.title}
+                    maxLength={60}
+                    onChange={(e) => set('replyTemplates', draft.replyTemplates.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)))}
+                  />
+                  <textarea
+                    placeholder="Message"
+                    value={t.body}
+                    maxLength={1000}
+                    onChange={(e) => set('replyTemplates', draft.replyTemplates.map((x, j) => (j === i ? { ...x, body: e.target.value } : x)))}
+                    className="min-h-[60px] rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
+                  />
+                  <Button variant="ghost" size="sm" onClick={() => set('replyTemplates', draft.replyTemplates.filter((_, j) => j !== i))}>
+                    Remove
+                  </Button>
+                </div>
+              ))}
+              {draft.replyTemplates.length < 20 && (
+                <Button variant="outline" size="sm" onClick={() => set('replyTemplates', [...draft.replyTemplates, { title: '', body: '' }])}>
+                  Add template
+                </Button>
+              )}
+            </div>
           </div>
         )}
         <div className="mt-5 flex items-center justify-end gap-3">

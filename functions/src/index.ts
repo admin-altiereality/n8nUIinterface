@@ -27,6 +27,7 @@ import {
   verifyMetaSignature,
 } from "./meta";
 import { auditEvents, messageEvents, rowEvents, schoolSummary, sortTimeline, toE164, type TwilioMessage } from "./schools";
+import { CALL_OUTCOMES, leaderboard, slaAlert, slaBreaches, weeklyDigest } from "./team";
 import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefaults, type AppSettings } from "./settings";
 
 setGlobalOptions({ maxInstances: 10 });
@@ -2411,10 +2412,13 @@ app.patch("/api/leads/:leadId", requireRoles(SHEETS_ROLES), async (req, res) => 
   if (!LEAD_ID_PATTERN.test(leadId)) return res.status(400).json({ error: "invalid_lead_id" });
   const body = (req.body || {}) as Record<string, unknown>;
   const note = safeText(body.note).slice(0, 2000);
+  const callInput = (body.call && typeof body.call === "object" ? body.call : null) as Record<string, unknown> | null;
+  const call = callInput ? { outcome: safeText(callInput.outcome), notes: safeText(callInput.notes).slice(0, 1000) } : null;
+  if (call && !(CALL_OUTCOMES as readonly string[]).includes(call.outcome)) return res.status(400).json({ error: "invalid_call_outcome" });
   const patch = buildLeadPatch(body, auth);
   if ("error" in patch) return res.status(400).json(patch);
   const hasFields = Object.keys(patch.fields).length > 0;
-  if (!hasFields && !note) return res.status(400).json({ error: "nothing_to_update" });
+  if (!hasFields && !note && !call) return res.status(400).json({ error: "nothing_to_update" });
 
   try {
     let result: { status: number; body: Record<string, unknown> } = { status: 200, body: { ok: true, lead: null } };
@@ -2426,6 +2430,7 @@ app.patch("/api/leads/:leadId", requireRoles(SHEETS_ROLES), async (req, res) => 
     }
     // Notes live in the audit log so a lead's activity is one feed.
     if (note) await writeOpsAudit({ action: "lead.note", auth, targetId: leadId, details: { text: note } });
+    if (call) await writeOpsAudit({ action: "lead.call", auth, targetId: leadId, details: call });
     return res.json(result.body);
   } catch (err) {
     logger.error("lead update failed", err);
@@ -2535,6 +2540,71 @@ app.get("/api/schools/:orgKey", requireRoles(SHEETS_ROLES), async (req, res) => 
     logger.error("school timeline failed", err);
     return res.status(502).json({ message: "Could not build the school timeline." });
   }
+});
+
+// ---- Team: leaderboard, speed-to-lead SLA alerts, weekly digest ----
+
+/** Emails the alert recipients through Sales • Alerts. */
+async function postAlert(title: string, text: string): Promise<boolean> {
+  try {
+    const { status } = await callN8nWebhook("sales-alert", { method: "POST", body: { title, detail: text }, timeoutMs: 10_000 });
+    return status < 400;
+  } catch (err) {
+    logger.warn("alert post failed", err);
+    return false;
+  }
+}
+
+async function auditSince(fromIso: string, limit = 3000): Promise<Array<Record<string, any>>> {
+  const snap = await getDataProjectDb().collection(OPS_AUDIT_COLLECTION).where("createdAt", ">=", fromIso).limit(limit).get();
+  return snap.docs.map((d) => d.data() as Record<string, any>);
+}
+
+app.get("/api/team/leaderboard", requireRoles(SHEETS_ROLES), async (req, res) => {
+  const days = Math.min(Math.max(Number.parseInt(String(req.query.days || "7"), 10) || 7, 1), 92);
+  const to = Date.now();
+  const from = to - days * 86_400_000;
+  try {
+    const [{ rows }, audit] = await Promise.all([fetchSheetLeadRows({ limit: "5000" }), auditSince(new Date(from).toISOString())]);
+    return res.json({ days, from: new Date(from).toISOString(), reps: leaderboard(rows, audit, { from, to }), slaBreaches: slaBreaches(rows, to) });
+  } catch (err) {
+    logger.error("leaderboard failed", err);
+    return res.status(502).json({ message: "Could not build the leaderboard." });
+  }
+});
+
+/** n8n calls this every 30 minutes in business hours; each lead alerts once per level (owner, then manager). */
+app.post("/api/internal/sla-check", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const { rows } = await fetchSheetLeadRows({ limit: "5000", fresh: "1" });
+  const breaches = slaBreaches(rows);
+  const state = getDataProjectDb().collection(ALERT_STATE_COLLECTION);
+  const fresh = [];
+  for (const b of breaches) {
+    const ref = state.doc(`sla-${b.leadId}-${b.level}`.replace(/[^A-Za-z0-9_-]/g, "_"));
+    if ((await ref.get()).exists) continue;
+    fresh.push({ b, ref });
+  }
+  let alerted = false;
+  if (fresh.length) {
+    const { title, text } = slaAlert(fresh.map((f) => f.b));
+    alerted = await postAlert(title, text);
+    if (alerted) await Promise.all(fresh.map((f) => f.ref.set({ lastSentAt: new Date().toISOString(), level: f.b.level })));
+  }
+  return res.json({ breaches: breaches.length, newlyAlerted: alerted ? fresh.length : 0 });
+});
+
+/** n8n calls this on Monday mornings. */
+app.post("/api/internal/digest", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const now = Date.now();
+  const [{ rows }, audit] = await Promise.all([
+    fetchSheetLeadRows({ limit: "5000", fresh: "1" }),
+    auditSince(new Date(now - 7 * 86_400_000).toISOString()),
+  ]);
+  const digest = weeklyDigest(rows, audit, now);
+  const sent = req.query.dry === "1" ? false : await postAlert(digest.title, digest.text);
+  return res.json({ sent, ...digest });
 });
 
 // ---- Settings and system health (Admin page) ----

@@ -158,7 +158,13 @@ export type LeadPatch = {
   /** Logs a first touch (call, WhatsApp or email) on the lead. */
   touch?: 'call' | 'whatsapp' | 'email';
   event?: 'no_show';
+  /** Logs a call with its outcome on the lead's activity. */
+  call?: { outcome: CallOutcome; notes?: string };
 };
+
+/** Mirrors CALL_OUTCOMES in functions/src/team.ts. */
+export const CALL_OUTCOMES = ['Interested', 'Call back later', 'Not interested', 'No answer', 'Wrong number'] as const;
+export type CallOutcome = (typeof CALL_OUTCOMES)[number];
 
 /** A refused lead update; `code` is the backend's error, e.g. `owner_conflict` with the current `owner`. */
 export class LeadUpdateError extends Error {
@@ -333,6 +339,7 @@ export type AppSettings = {
   welcomeMode: 'test' | 'live';
   metaMaxDailyBudgetInr: number;
   alertRecipients: string[];
+  replyTemplates: Array<{ title: string; body: string }>;
 };
 
 export type WorkflowHealth = {
@@ -407,5 +414,27 @@ export type School360 = {
 export async function fetchSchool(orgKey: string): Promise<School360> {
   const res = await fetchWithAuthRetry(opsUrl(`/api/schools/${encodeURIComponent(orgKey)}`));
   if (!res.ok) await parseError(res, 'Could not load this school.');
+  return res.json();
+}
+
+// ---- Team ----
+
+export type RepStats = {
+  rep: string;
+  openDeals: number;
+  touches: number;
+  calls: number;
+  notes: number;
+  demos: number;
+  won: number;
+  wonInr: number;
+  speedMedianMs: number | null;
+};
+
+export type SlaBreach = { leadId: string; school: string; owner: string; level: 'owner' | 'manager'; waitingMs: number; hotAt: string };
+
+export async function fetchLeaderboard(days: number): Promise<{ days: number; from: string; reps: RepStats[]; slaBreaches: SlaBreach[] }> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/team/leaderboard?days=${days}`));
+  if (!res.ok) await parseError(res, 'Could not load the leaderboard.');
   return res.json();
 }

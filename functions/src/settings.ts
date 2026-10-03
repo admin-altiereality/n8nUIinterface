@@ -28,6 +28,8 @@ export type AppSettings = {
   metaMaxDailyBudgetInr: number;
   /** Who gets hot-lead and failure alerts. */
   alertRecipients: string[];
+  /** Canned replies reps can insert in Messaging and the lead drawer. */
+  replyTemplates: Array<{ title: string; body: string }>;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -39,12 +41,26 @@ export const DEFAULT_SETTINGS: AppSettings = {
   welcomeMode: "test",
   metaMaxDailyBudgetInr: 2000,
   alertRecipients: ["gaurav@altiereality.com"],
+  replyTemplates: [],
 };
 
 /** Hard ceilings so a typo can't, say, send 2,000 cold emails in a day. */
 const LIMITS = { dailyEmailCap: 100, monthlyTargetInr: 100_000_000, spend: 10_000_000, metaMaxDailyBudgetInr: 50_000 };
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Up to 20 templates; titles up to 60 characters, bodies up to 1,000. Null when the input isn't valid. */
+function cleanTemplates(value: unknown): Array<{ title: string; body: string }> | null {
+  if (!Array.isArray(value) || value.length > 20) return null;
+  const out: Array<{ title: string; body: string }> = [];
+  for (const t of value) {
+    const title = String((t as any)?.title ?? "").trim();
+    const body = String((t as any)?.body ?? "").trim();
+    if (!title || !body || title.length > 60 || body.length > 1000) return null;
+    out.push({ title, body });
+  }
+  return out;
+}
 
 function wholeNumber(value: unknown, max: number): number | null {
   const n = Number(value);
@@ -74,6 +90,7 @@ export function withDefaults(stored: unknown): AppSettings {
       Array.isArray(s.alertRecipients) && s.alertRecipients.some((e: unknown) => EMAIL.test(String(e)))
         ? s.alertRecipients.map((e: unknown) => String(e).trim().toLowerCase()).filter((e: string) => EMAIL.test(e))
         : DEFAULT_SETTINGS.alertRecipients,
+    replyTemplates: cleanTemplates(s.replyTemplates) ?? DEFAULT_SETTINGS.replyTemplates,
   };
 }
 
@@ -129,6 +146,12 @@ export function applySettingsPatch(current: AppSettings, patch: unknown): AppSet
         const list = Array.isArray(value) ? value.map((e) => String(e).trim().toLowerCase()).filter(Boolean) : null;
         if (!list || !list.length || list.some((e) => !EMAIL.test(e))) return "Alert recipients must be email addresses.";
         next.alertRecipients = [...new Set(list)].slice(0, 10);
+        break;
+      }
+      case "replyTemplates": {
+        const list = cleanTemplates(value);
+        if (!list) return "Templates need a title (60 characters max) and text (1,000 max); 20 templates at most.";
+        next.replyTemplates = list;
         break;
       }
       default:
