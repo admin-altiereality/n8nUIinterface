@@ -66,18 +66,21 @@ Every webhook needs the `X-Altie-Key` header (n8n credential "Altie Function Key
 
 ### One-time Meta setup (owner: you)
 
-1. **Ad account, Page and Instagram** (decided 2026-10-03): business ad account `1210737851250614` (altie_reality,
-   INR), the **Altie Reality** Page `112468273892432`, and Instagram **@learn__xr** `17841455631811431`. All three are
-   owned by the altie_reality business, which the system-user token requires.
-   - @learn__xr is already linked to the Altie Reality Page. Its only connected ad account is a closed LeadsBridge
-     account.
-   - Business settings → Ad accounts → `1210737851250614` → give yourself **Full control**; it is "(Read-Only)" today.
-     Then use **Connect assets** to add the Altie Reality Page and @learn__xr.
-   - Business settings → Integrations → **ads MCP server**: allow @learn__xr and the ad account, so Claude can read the
-     posts.
+1. **Ad account, Page and Instagram** (status 2026-10-03)
+   - The dashboard uses the personal ad account `784451571902986` (INR) with the **Altie Reality** Page
+     `112468273892432`. This works for Facebook Page ads and for reporting.
+   - Instagram **@learn__xr** `17841455631811431` belongs to the altie_reality business (`297072588008378`). A
+     business-owned Instagram account can only be connected to ad accounts inside that business, and Meta currently
+     blocks altie_reality from creating or adding one ("maximum number of ad accounts for a new business portfolio").
+     Until that lifts, boost @learn__xr posts in the Instagram app or in Ads Manager by hand.
+   - When the limit lifts (a check is scheduled for 2026-10-17):
+     - create an INR ad account inside altie_reality;
+     - use **Connect assets** to add the Altie Reality Page and @learn__xr;
+     - add the account under Integrations → **ads MCP server**;
+     - set `META_AD_ACCOUNT_ID` to the new account's ID and switch to a system-user token.
 2. **developers.facebook.com → Create app (Business)**
    - Add **Marketing API** and **Webhooks**. Note the **App secret**.
-3. **Business Settings → System users → Add** (Admin)
+3. **Token.** On the personal ad account, use a long-lived **user** token from Graph API Explorer (about 60 days, then renew). After moving to a business ad account, use **Business Settings → System users → Add** (Admin) instead:
    - Assign the ad account (Manage campaigns), the Page and the Instagram account. A personal ad account can only be assigned to a system user once it has been added to the business; if that isn't possible, generate a long-lived **user** token from the app instead.
    - **Generate token** for the app with these scopes, set never to expire: `ads_management`, `ads_read`,
      `business_management`, `pages_show_list`, `pages_read_engagement`, `pages_manage_metadata`, `leads_retrieval`,
