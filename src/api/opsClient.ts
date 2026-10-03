@@ -276,7 +276,10 @@ export type MetaBoostRequest = {
 
 export type MetaBoostResult = { campaignId: string; adsetId: string; adId: string; name: string; previewHtml: string };
 
-export async function fetchMetaOverview(range: MetaRange): Promise<MetaInsights & { accountId: string }> {
+/** "snapshot" = numbers Claude pulled through the Meta Ads MCP while the live Meta token isn't set (read-only). */
+export type MetaSource = { source?: 'snapshot'; capturedAt?: string; note?: string };
+
+export async function fetchMetaOverview(range: MetaRange): Promise<MetaInsights & MetaSource & { accountId: string }> {
   const res = await fetchWithAuthRetry(opsUrl(`/api/meta/overview?range=${range}`));
   if (!res.ok) await parseError(res, 'Could not load Meta overview.');
   return res.json();
@@ -285,7 +288,7 @@ export async function fetchMetaOverview(range: MetaRange): Promise<MetaInsights 
 export async function fetchMetaCampaigns(
   range: MetaRange,
   fresh = false
-): Promise<{ accountId: string; maxDailyBudget: number; campaigns: MetaCampaign[] }> {
+): Promise<MetaSource & { accountId: string; maxDailyBudget: number; campaigns: MetaCampaign[] }> {
   const res = await fetchWithAuthRetry(opsUrl(`/api/meta/campaigns?range=${range}${fresh ? '&fresh=1' : ''}`));
   if (!res.ok) await parseError(res, 'Could not load Meta campaigns.');
   return res.json();

@@ -2520,10 +2520,52 @@ async function metaCached<T>(key: string, load: () => Promise<T>): Promise<T> {
   return data;
 }
 
+/**
+ * Until the Meta token is set, Claude posts a read-only snapshot of the ad account (pulled through the Meta Ads MCP)
+ * and the read routes serve it, marked source: "snapshot".
+ */
+const META_SNAPSHOT_DOC = "metaSnapshots/latest";
+
+async function readMetaSnapshot(): Promise<Record<string, any> | null> {
+  try {
+    const doc = await getDataProjectDb().doc(META_SNAPSHOT_DOC).get();
+    return doc.exists ? (doc.data() as Record<string, any>) : null;
+  } catch (err) {
+    logger.warn("Meta snapshot read failed", err);
+    return null;
+  }
+}
+
+function hasAltieKey(req: express.Request): boolean {
+  const given = Buffer.from(String(req.get("x-altie-key") || ""));
+  const expected = Buffer.from(n8nWebhookSecret.value() || "");
+  return expected.length > 0 && given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+app.post("/api/meta/snapshot", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const body = req.body || {};
+  if (!body.ranges || typeof body.ranges !== "object") return res.status(400).json({ message: "ranges is required." });
+  const snapshot = {
+    capturedAt: typeof body.capturedAt === "string" ? body.capturedAt : new Date().toISOString(),
+    accountId: String(body.accountId || META_AD_ACCOUNT_ID),
+    note: typeof body.note === "string" ? body.note.slice(0, 300) : "",
+    ranges: body.ranges,
+    posts: Array.isArray(body.posts) ? body.posts.slice(0, 24) : [],
+  };
+  await getDataProjectDb().doc(META_SNAPSHOT_DOC).set(snapshot);
+  return res.json({ ok: true, capturedAt: snapshot.capturedAt });
+});
+
 app.get("/api/meta/overview", requireRoles(META_ROLES), async (req, res) => {
   const creds = getMetaCreds();
-  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
   const range = metaRange(req);
+  if (!creds) {
+    const snap = await readMetaSnapshot();
+    const overview = snap?.ranges?.[range]?.overview;
+    if (!overview) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+    return res.json({ range, accountId: snap.accountId, ...overview, source: "snapshot", capturedAt: snap.capturedAt, note: snap.note });
+  }
   try {
     return res.json({ range, accountId: META_AD_ACCOUNT_ID, ...(await metaCached(`overview:${range}`, () => getOverview(creds, range))) });
   } catch (err) {
@@ -2533,8 +2575,20 @@ app.get("/api/meta/overview", requireRoles(META_ROLES), async (req, res) => {
 
 app.get("/api/meta/campaigns", requireRoles(META_ROLES), async (req, res) => {
   const creds = getMetaCreds();
-  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
   const range = metaRange(req);
+  if (!creds) {
+    const snap = await readMetaSnapshot();
+    const campaigns = snap?.ranges?.[range]?.campaigns;
+    if (!Array.isArray(campaigns)) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+    return res.json({
+      range,
+      accountId: snap.accountId,
+      maxDailyBudget: META_MAX_DAILY_BUDGET_INR,
+      campaigns,
+      source: "snapshot",
+      capturedAt: snap.capturedAt,
+    });
+  }
   try {
     const fresh = req.query.fresh === "1";
     const campaigns = fresh ? await listCampaigns(creds, range) : await metaCached(`campaigns:${range}`, () => listCampaigns(creds, range));
@@ -2547,7 +2601,14 @@ app.get("/api/meta/campaigns", requireRoles(META_ROLES), async (req, res) => {
 
 app.get("/api/meta/ig-media", requireRoles(META_ROLES), async (_req, res) => {
   const creds = getMetaCreds();
-  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+  if (!creds) {
+    const snap = await readMetaSnapshot();
+    if (!snap) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+    if (!snap.posts?.length) {
+      return res.status(503).json({ message: "Instagram posts aren't available yet: @learn__xr isn't connected to an ad account." });
+    }
+    return res.json({ media: snap.posts, source: "snapshot", capturedAt: snap.capturedAt });
+  }
   try {
     return res.json({ media: await metaCached("ig-media", () => listInstagramMedia(creds)) });
   } catch (err) {

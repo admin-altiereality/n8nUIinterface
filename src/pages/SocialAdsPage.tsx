@@ -33,6 +33,12 @@ const OBJECTIVES: Record<string, string> = {
   OUTCOME_LEADS: 'Leads',
   OUTCOME_SALES: 'Sales',
   OUTCOME_AWARENESS: 'Awareness',
+  // Objectives of campaigns made before Meta's 2022 "outcome" objectives.
+  LINK_CLICKS: 'Visits',
+  MESSAGES: 'Messages',
+  LEAD_GENERATION: 'Leads',
+  POST_ENGAGEMENT: 'Engagement',
+  REACH: 'Reach',
 };
 
 const num = (n: number) => new Intl.NumberFormat('en-IN').format(n);
@@ -206,7 +212,9 @@ function BoostDialog({
 
 export default function SocialAdsPage() {
   const { user } = useAuth();
-  const canSpend = user?.role === 'superadmin';
+  const [snapshot, setSnapshot] = useState<{ capturedAt?: string; note?: string } | null>(null);
+  // A snapshot is read-only: changes need the live Meta connection.
+  const canSpend = user?.role === 'superadmin' && !snapshot;
   const [range, setRange] = useState<MetaRange>('last_28d');
   const [overview, setOverview] = useState<MetaInsights | null>(null);
   const [campaigns, setCampaigns] = useState<MetaCampaign[]>([]);
@@ -232,6 +240,7 @@ export default function SocialAdsPage() {
       try {
         const [ov, list] = await Promise.all([fetchMetaOverview(range), fetchMetaCampaigns(range, fresh)]);
         setOverview(ov);
+        setSnapshot(list.source === 'snapshot' ? { capturedAt: list.capturedAt, note: ov.note } : null);
         setCampaigns(list.campaigns);
         setAccountId(list.accountId);
         setMaxDailyBudget(list.maxDailyBudget);
@@ -309,6 +318,14 @@ export default function SocialAdsPage() {
           )}
         </div>
       </PageHeader>
+
+      {snapshot && (
+        <div className="mb-4 rounded-md border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-[11px] text-sky-200">
+          Read-only snapshot pulled by Claude through Meta
+          {snapshot.capturedAt ? ` on ${new Date(snapshot.capturedAt).toLocaleString()}` : ''}. Pausing, budgets and
+          boosts turn on once the Meta app token is set.{snapshot.note ? ` ${snapshot.note}` : ''}
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">{error}</div>
