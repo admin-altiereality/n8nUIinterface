@@ -12,7 +12,6 @@ import { defineSecret } from "firebase-functions/params";
 import { createHmac, timingSafeEqual } from "crypto";
 import {
   META_AD_ACCOUNT_ID,
-  META_MAX_DAILY_BUDGET_INR,
   META_RANGES,
   MetaApiError,
   type MetaCreds,
@@ -27,6 +26,7 @@ import {
   updateEntity,
   verifyMetaSignature,
 } from "./meta";
+import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefaults, type AppSettings } from "./settings";
 
 setGlobalOptions({ maxInstances: 10 });
 
@@ -79,6 +79,8 @@ const OPS_ROLES = new Set(["superadmin", "associate", "salesperson", "whatsapp_m
 /** Social Ads: associates can watch; only superadmins can spend (pause/resume, budgets, boosts). */
 const META_ROLES = new Set(["superadmin", "associate"]);
 const META_WRITE_ROLES = new Set(["superadmin"]);
+/** Settings and system health. */
+const ADMIN_ROLES = new Set(["superadmin"]);
 
 const SALES_FUNNEL_WORKFLOW_ID =
   process.env.N8N_SALES_WORKFLOW_ID || "6pBPEDzIfj8939GG";
@@ -2486,6 +2488,127 @@ app.post("/u/:leadId", async (req, res) => {
   return res.send(unsubscribePage("You're unsubscribed", "<p>We won't email you again. Sorry for the interruption.</p>"));
 });
 
+// ---- Settings and system health (Admin page) ----
+
+let settingsCache: { at: number; value: AppSettings } | null = null;
+
+/** Settings with defaults filled in; cached for a minute because every page load asks for them. */
+async function loadSettings(fresh = false): Promise<AppSettings> {
+  if (!fresh && settingsCache && Date.now() - settingsCache.at < 60_000) return settingsCache.value;
+  let stored: unknown = null;
+  try {
+    const doc = await getDataProjectDb().doc(SETTINGS_DOC).get();
+    stored = doc.exists ? doc.data() : null;
+  } catch (err) {
+    logger.warn("settings read failed; using defaults", err);
+  }
+  const value = withDefaults(stored);
+  settingsCache = { at: Date.now(), value };
+  return value;
+}
+
+app.get("/api/settings", requireRoles(OPS_ROLES), async (_req, res) => {
+  return res.json(await loadSettings());
+});
+
+app.patch("/api/settings", requireRoles(ADMIN_ROLES), async (req, res) => {
+  const before = await loadSettings(true);
+  const next = applySettingsPatch(before, req.body);
+  if (typeof next === "string") return res.status(400).json({ message: next });
+  const changed = changedKeys(before, next);
+  if (!changed.length) return res.json(next);
+  await getDataProjectDb().doc(SETTINGS_DOC).set(next);
+  settingsCache = { at: Date.now(), value: next };
+  const details: Record<string, unknown> = {};
+  for (const key of changed) details[key] = { from: before[key], to: next[key] };
+  await writeOpsAudit({ action: "settings.update", auth: getAuthedUser(req), targetId: "settings", details });
+  return res.json(next);
+});
+
+/** n8n reads caps and modes here (X-Altie-Key), so they change without editing workflows. */
+app.get("/api/internal/settings", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  return res.json(await loadSettings());
+});
+
+/** The workflows the Admin page watches. */
+const HEALTH_WORKFLOWS = [
+  { id: SALES_FUNNEL_WORKFLOW_ID, name: "Sales • Outbound", role: "City runs, first emails, daily follow-ups" },
+  { id: "bq3CxiN0PNkkPS3H", name: "Sales • Inbound", role: "WhatsApp replies, website and Meta leads, email events" },
+  { id: "Kr0OoK8tBQsMwdhq", name: "Sales • Leads", role: "Reads and writes the lead sheet" },
+  { id: "X4VKYxULlC9eIwAF", name: "Sales • Alerts", role: "Hot-lead and failure emails" },
+];
+
+const istDay = (t: number) => new Date(t + 5.5 * 3_600_000).toISOString().slice(0, 10);
+
+app.get("/api/admin/health", requireRoles(ADMIN_ROLES), async (_req, res) => {
+  const { apiUrl, apiKey } = getN8nConfig();
+  const base = String(apiUrl || "").replace(/\/$/, "");
+  const workflows = await Promise.all(
+    HEALTH_WORKFLOWS.map(async (wf) => {
+      try {
+        const upstream = await fetch(`${base}/api/v1/executions?workflowId=${wf.id}&limit=100`, {
+          headers: { "X-N8N-API-KEY": String(apiKey || "") },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!upstream.ok) throw new Error(`n8n returned ${upstream.status}`);
+        const body = (await upstream.json()) as { data?: Array<Record<string, any>> };
+        const runs = (body.data || []).map((e) => ({
+          id: String(e.id),
+          status: String(e.status || (e.finished ? "success" : "unknown")),
+          mode: e.mode,
+          startedAt: String(e.startedAt || ""),
+          stoppedAt: e.stoppedAt,
+        }));
+        return { ...wf, ok: true, ...summarizeRuns(runs) };
+      } catch (err) {
+        return { ...wf, ok: false, error: String(err instanceof Error ? err.message : err) };
+      }
+    })
+  );
+
+  const settings = await loadSettings();
+  const today = istDay(Date.now());
+  let emailsToday: number | null = null;
+  try {
+    const { rows } = await fetchSheetLeadRows({ limit: "5000" });
+    const sentOn = (v: unknown) => {
+      const t = Date.parse(String(v || "").trim().replace(/^"|"$/g, ""));
+      return Number.isFinite(t) && istDay(t) === today;
+    };
+    emailsToday = rows.filter((r: Record<string, unknown>) => sentOn(r.Email_sent_at) || sentOn(r.Last_Follow_up)).length;
+  } catch (err) {
+    logger.warn("health: sheet read failed", err);
+  }
+
+  const db = getDataProjectDb();
+  const dayAgoIso = new Date(Date.now() - 86_400_000).toISOString();
+  const [failedSnap, snapshot] = await Promise.all([
+    db.collection(TWILIO_STATUS_COLLECTION).where("updatedAt", ">=", dayAgoIso).limit(500).get().catch(() => null),
+    readMetaSnapshot(),
+  ]);
+  const whatsappFailed24h = failedSnap
+    ? failedSnap.docs.filter((d) => ["failed", "undelivered"].includes(safeText(d.data().status).toLowerCase())).length
+    : null;
+
+  let templates: number | null = null;
+  const t = getTwilioConfig();
+  if (t.ok) templates = await listApprovedTemplates(t).then((list) => list.length).catch(() => null);
+
+  return res.json({
+    checkedAt: new Date().toISOString(),
+    workflows,
+    email: { sentToday: emailsToday, cap: settings.dailyEmailCap },
+    whatsapp: { failed24h: whatsappFailed24h, approvedTemplates: templates },
+    meta: {
+      mode: getMetaCreds() ? "live" : snapshot ? "snapshot" : "not connected",
+      snapshotAt: snapshot?.capturedAt || null,
+      adAccountId: META_AD_ACCOUNT_ID,
+    },
+    modes: { autoActions: settings.autoActionsMode, welcome: settings.welcomeMode },
+  });
+});
+
 // ---- Meta (Instagram/Facebook) ads: Social Ads page and lead-ads webhook ----
 
 function getMetaCreds(): MetaCreds | null {
@@ -2583,7 +2706,7 @@ app.get("/api/meta/campaigns", requireRoles(META_ROLES), async (req, res) => {
     return res.json({
       range,
       accountId: snap.accountId,
-      maxDailyBudget: META_MAX_DAILY_BUDGET_INR,
+      maxDailyBudget: (await loadSettings()).metaMaxDailyBudgetInr,
       campaigns,
       source: "snapshot",
       capturedAt: snap.capturedAt,
@@ -2593,7 +2716,7 @@ app.get("/api/meta/campaigns", requireRoles(META_ROLES), async (req, res) => {
     const fresh = req.query.fresh === "1";
     const campaigns = fresh ? await listCampaigns(creds, range) : await metaCached(`campaigns:${range}`, () => listCampaigns(creds, range));
     if (fresh) metaCache.set(`campaigns:${range}`, { at: Date.now(), data: campaigns });
-    return res.json({ range, accountId: META_AD_ACCOUNT_ID, maxDailyBudget: META_MAX_DAILY_BUDGET_INR, campaigns });
+    return res.json({ range, accountId: META_AD_ACCOUNT_ID, maxDailyBudget: (await loadSettings()).metaMaxDailyBudgetInr, campaigns });
   } catch (err) {
     return sendMetaError(res, err, "campaigns");
   }
@@ -2619,7 +2742,7 @@ app.get("/api/meta/ig-media", requireRoles(META_ROLES), async (_req, res) => {
 app.patch("/api/meta/entities/:id", requireRoles(META_WRITE_ROLES), async (req, res) => {
   const creds = getMetaCreds();
   if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
-  const change = parseEntityChange(req.body);
+  const change = parseEntityChange(req.body, (await loadSettings()).metaMaxDailyBudgetInr);
   if (typeof change === "string") return res.status(400).json({ message: change });
   const id = safeText(req.params.id);
   try {
@@ -2635,7 +2758,7 @@ app.patch("/api/meta/entities/:id", requireRoles(META_WRITE_ROLES), async (req, 
 app.post("/api/meta/boost", requireRoles(META_WRITE_ROLES), async (req, res) => {
   const creds = getMetaCreds();
   if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
-  const boost = parseBoostRequest(req.body);
+  const boost = parseBoostRequest(req.body, (await loadSettings()).metaMaxDailyBudgetInr);
   if (typeof boost === "string") return res.status(400).json({ message: boost });
   const auth = getAuthedUser(req);
   try {

@@ -158,7 +158,7 @@ export async function assertOwnEntity(creds: MetaCreds, id: string): Promise<voi
 
 export type EntityChange = { status?: "ACTIVE" | "PAUSED"; dailyBudget?: number };
 
-export function parseEntityChange(body: any): EntityChange | string {
+export function parseEntityChange(body: any, maxDailyBudget = META_MAX_DAILY_BUDGET_INR): EntityChange | string {
   const change: EntityChange = {};
   if (body?.status !== undefined) {
     if (body.status !== "ACTIVE" && body.status !== "PAUSED") return "status must be ACTIVE or PAUSED.";
@@ -167,7 +167,7 @@ export function parseEntityChange(body: any): EntityChange | string {
   if (body?.dailyBudget !== undefined) {
     const budget = Number(body.dailyBudget);
     if (!Number.isFinite(budget) || budget <= 0) return "dailyBudget must be a positive number of rupees.";
-    if (budget > META_MAX_DAILY_BUDGET_INR) return `dailyBudget is above the ₹${META_MAX_DAILY_BUDGET_INR}/day limit.`;
+    if (budget > maxDailyBudget) return `dailyBudget is above the ₹${maxDailyBudget}/day limit.`;
     change.dailyBudget = Math.round(budget);
   }
   if (change.status === undefined && change.dailyBudget === undefined) return "Nothing to change.";
@@ -192,13 +192,13 @@ export type BoostRequest = {
   ageMin: number;
 };
 
-export function parseBoostRequest(body: any): BoostRequest | string {
+export function parseBoostRequest(body: any, maxDailyBudget = META_MAX_DAILY_BUDGET_INR): BoostRequest | string {
   const igMediaId = String(body?.igMediaId || "");
   if (!/^\d{5,25}$/.test(igMediaId)) return "Pick an Instagram post.";
   const goal = body?.goal === "engagement" ? "engagement" : "visits";
   const dailyBudget = Math.round(Number(body?.dailyBudget));
   if (!Number.isFinite(dailyBudget) || dailyBudget < 100) return "Daily budget must be at least ₹100.";
-  if (dailyBudget > META_MAX_DAILY_BUDGET_INR) return `Daily budget is above the ₹${META_MAX_DAILY_BUDGET_INR}/day limit.`;
+  if (dailyBudget > maxDailyBudget) return `Daily budget is above the ₹${maxDailyBudget}/day limit.`;
   const days = Math.round(Number(body?.days));
   if (!Number.isFinite(days) || days < 1 || days > 30) return "Run for 1 to 30 days.";
   const cities = (Array.isArray(body?.cities) ? body.cities : []).map((c: unknown) => String(c).trim()).filter(Boolean).slice(0, 10);

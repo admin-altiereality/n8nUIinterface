@@ -9,7 +9,6 @@ import { useAuth } from '../context/AuthContext';
 import { fetchMetaOverview } from '../api/opsClient';
 import { leadPhoneForMessaging, type SchoolLeadRow } from '../api/sheetsClient';
 import {
-  MONTHLY_TARGET_INR,
   QUEUE_SECTIONS,
   field,
   formatDuration,
@@ -25,6 +24,7 @@ import {
 } from '../lib/pipeline';
 import { useLeadUpdate } from '../lib/useLeadUpdate';
 import { useSheetLeads } from '../lib/useSheetLeads';
+import { useAppSettings } from '../lib/useAppSettings';
 
 const REFRESH_MS = 60_000;
 
@@ -64,10 +64,12 @@ export default function SalesHomePage() {
       .then((o) => setMetaSpend(o.spend))
       .catch(() => setMetaSpend(null)); // Meta not connected yet: keep the configured spend
   }, [canSeeAds]);
-  const kpis = useMemo(
-    () => salesKpis(leads, { now, ...(metaSpend ? { spendInr: metaSpend } : {}) }),
-    [leads, now, metaSpend]
-  );
+  // Target and non-Meta channel spend come from Admin → Settings.
+  const settings = useAppSettings();
+  const targetInr = settings?.monthlyTargetInr ?? 0;
+  const otherSpend = settings ? Object.values(settings.channelSpendInr).reduce((a, b) => a + b, 0) : 0;
+  const spendInr = (metaSpend ?? 0) + otherSpend;
+  const kpis = useMemo(() => salesKpis(leads, { now, targetInr, spendInr }), [leads, now, targetInr, spendInr]);
   const funnel = useMemo(() => funnelConversion(leads), [leads]);
   const queueSize = QUEUE_SECTIONS.reduce((n, s) => n + queue[s.key].length, 0);
 
@@ -226,7 +228,7 @@ export default function SalesHomePage() {
           value={formatInr(kpis.wonValue)}
           sub={
             kpis.targetShare !== null
-              ? `${Math.round(kpis.targetShare * 100)}% of the ${formatInr(MONTHLY_TARGET_INR)} target`
+              ? `${Math.round(kpis.targetShare * 100)}% of the ${formatInr(targetInr)} target`
               : `${kpis.wonCount} school${kpis.wonCount === 1 ? '' : 's'} won`
           }
         />
@@ -243,7 +245,7 @@ export default function SalesHomePage() {
         <Kpi
           label="Cost per demo"
           value={kpis.costPerDemo !== null ? formatInr(kpis.costPerDemo) : '—'}
-          sub={kpis.costPerDemo !== null ? (metaSpend ? 'Meta ad spend this month' : 'This month') : 'Monthly spend not set yet'}
+          sub={kpis.costPerDemo !== null ? 'Ad spend + channel costs this month' : 'Set monthly spend in Admin → Settings'}
         />
       </div>
 

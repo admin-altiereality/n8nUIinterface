@@ -8,6 +8,7 @@ import TwilioMessagingPage from './pages/TwilioMessagingPage';
 import OpsDashboardPage from './pages/OpsDashboardPage';
 import LeadTimelinePage from './pages/LeadTimelinePage';
 import SocialAdsPage from './pages/SocialAdsPage';
+import AdminPage from './pages/AdminPage';
 import LoginPage from './pages/LoginPage';
 import { AuthProvider } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -94,6 +95,16 @@ const App: React.FC = () => {
             <ProtectedRoute allowedRoles={['superadmin', 'associate']}>
               <AppLayout>
                 <SocialAdsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin']}>
+              <AppLayout>
+                <AdminPage />
               </AppLayout>
             </ProtectedRoute>
           }

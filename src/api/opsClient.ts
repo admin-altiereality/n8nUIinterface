@@ -318,3 +318,64 @@ export async function boostMetaIgPost(req: MetaBoostRequest): Promise<MetaBoostR
   if (!res.ok) await parseError(res, 'Could not create the boost.');
   return res.json();
 }
+
+// ---- Settings and system health (Admin page) ----
+
+export type LeadSourceKey = 'cold_email' | 'website' | 'instagram_ad' | 'facebook_ad' | 'whatsapp' | 'other';
+
+/** Mirrors AppSettings in functions/src/settings.ts. */
+export type AppSettings = {
+  monthlyTargetInr: number;
+  channelSpendInr: Record<LeadSourceKey, number>;
+  dailyEmailCap: number;
+  followUpMax: number;
+  autoActionsMode: 'test' | 'live';
+  welcomeMode: 'test' | 'live';
+  metaMaxDailyBudgetInr: number;
+  alertRecipients: string[];
+};
+
+export type WorkflowHealth = {
+  id: string;
+  name: string;
+  role: string;
+  ok: boolean;
+  error?: string;
+  lastRunAt?: string | null;
+  lastStatus?: string | null;
+  runs24h?: number;
+  errors24h?: number;
+  lastErrorAt?: string | null;
+  lastErrorId?: string | null;
+};
+
+export type AdminHealth = {
+  checkedAt: string;
+  workflows: WorkflowHealth[];
+  email: { sentToday: number | null; cap: number };
+  whatsapp: { failed24h: number | null; approvedTemplates: number | null };
+  meta: { mode: 'live' | 'snapshot' | 'not connected'; snapshotAt: string | null; adAccountId: string };
+  modes: { autoActions: string; welcome: string };
+};
+
+export async function fetchSettings(): Promise<AppSettings> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/settings'));
+  if (!res.ok) await parseError(res, 'Could not load settings.');
+  return res.json();
+}
+
+export async function updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/settings'), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) await parseError(res, 'Could not save settings.');
+  return res.json();
+}
+
+export async function fetchAdminHealth(): Promise<AdminHealth> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/admin/health'));
+  if (!res.ok) await parseError(res, 'Could not load system health.');
+  return res.json();
+}

@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Zap,
   Megaphone,
+  Settings,
 } from 'lucide-react';
 
 interface NavItem {
@@ -60,6 +61,12 @@ const NAV_ITEMS: NavItem[] = [
     path: '/twilio-messaging',
     icon: <MessageCircle className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'salesperson', 'whatsapp_manager'],
+  },
+  {
+    label: 'Admin',
+    path: '/admin',
+    icon: <Settings className="w-5 h-5" />,
+    roles: ['superadmin'],
   },
   {
     label: 'Builder',
