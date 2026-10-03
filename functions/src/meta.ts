@@ -5,8 +5,11 @@
 import { createHmac, timingSafeEqual } from "crypto";
 
 export const META_GRAPH_VERSION = "v26.0";
-/** altie_reality business (INR). Business-owned, so the system-user token can use it with @learn__xr. */
-export const META_AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID || "1210737851250614";
+/**
+ * "Gaurav Purbia" (INR, personal). Meta won't let the altie_reality portfolio add an ad account for a few weeks
+ * (new-portfolio limit, seen 2026-10-03), so this runs on a long-lived user token until a business account exists.
+ */
+export const META_AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID || "784451571902986";
 /** The Altie Reality Facebook Page; @learn__xr (17841455631811431) is linked to it and looked up from it. */
 export const META_PAGE_ID = process.env.META_PAGE_ID || "112468273892432";
 /** Highest daily budget the dashboard may set on one ad set, in rupees. */
