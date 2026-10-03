@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fetchSheetLeads, type SchoolLeadRow } from '../api/sheetsClient';
 
+/** Rows created by end-to-end tests ("ZZ Test …") stay in the sheet but out of the dashboard and its numbers. */
+export function isTestLead(row: SchoolLeadRow): boolean {
+  return /^zz test/i.test(String(row['School Name'] || '').trim());
+}
+
 /** Loads every lead from the sheet (optionally on a timer); pages filter them in memory. */
 export function useSheetLeads({ refreshMs, enabled = true }: { refreshMs?: number; enabled?: boolean } = {}) {
   const [leads, setLeads] = useState<SchoolLeadRow[]>([]);
@@ -13,7 +18,7 @@ export function useSheetLeads({ refreshMs, enabled = true }: { refreshMs?: numbe
     setError(null);
     try {
       const result = await fetchSheetLeads({ limit: 2000 });
-      setLeads(result.rows);
+      setLeads(result.rows.filter((row) => !isTestLead(row)));
       setFetchedAt(result.fetchedAt);
     } catch (e) {
       // Keep the last good list on screen; only the error banner changes.

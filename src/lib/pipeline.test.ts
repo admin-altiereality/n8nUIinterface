@@ -11,6 +11,8 @@ import {
   todayQueue,
   tomorrowMorning,
   whatsappWindowLeftMs,
+  channelRoi,
+  leadSource,
 } from './pipeline';
 
 // 2 Oct 2026, 15:00 IST
@@ -142,5 +144,50 @@ describe('formatting', () => {
     expect(formatDuration(42 * 60_000)).toBe('42m');
     expect(formatDuration(3 * HOUR + 5 * 60_000)).toBe('3h 5m');
     expect(formatDuration(72 * HOUR)).toBe('3d');
+  });
+});
+
+describe('leadSource', () => {
+  it('uses Lead_source when set', () => {
+    expect(leadSource({ Lead_source: 'instagram_ad' } as SchoolLeadRow)).toBe('instagram_ad');
+  });
+
+  it('infers the source of older rows', () => {
+    expect(leadSource({ XR_keywords: 'facebook_lead_ad, Indore' } as SchoolLeadRow)).toBe('facebook_ad');
+    expect(leadSource({ Status: 'website_lead' } as SchoolLeadRow)).toBe('website');
+    expect(leadSource({ XR_status: 'Inbound Website Lead' } as SchoolLeadRow)).toBe('website');
+    expect(leadSource({ Status: 'sent' } as SchoolLeadRow)).toBe('cold_email');
+    expect(leadSource({ Lead_source: 'tv' } as SchoolLeadRow)).toBe('cold_email');
+  });
+});
+
+describe('channelRoi', () => {
+  const from = Date.parse('2026-10-01T00:00:00+05:30');
+  const to = Date.parse('2026-11-01T00:00:00+05:30');
+  const rows = [
+    { Lead_source: 'instagram_ad', Time: '2026-10-02T10:00:00+05:30', Hot_at: '2026-10-02T10:00:00+05:30', Demo_booked_at: '2026-10-05T10:00:00+05:30' },
+    { Lead_source: 'instagram_ad', Time: '2026-10-03T10:00:00+05:30', Stage: 'Won', Won_at: '2026-10-20T10:00:00+05:30', Paid_amount: '50000' },
+    { Lead_source: 'cold_email', Time: '2026-09-20T10:00:00+05:30', Email_sent_at: '2026-09-20T10:00:00+05:30', Hot_at: '2026-10-04T10:00:00+05:30' },
+  ] as SchoolLeadRow[];
+
+  it('counts events in the window per source and divides the spend', () => {
+    const roi = channelRoi(rows, { from, to, spendBySource: { instagram_ad: 3000, cold_email: 1000 } });
+    const ig = roi.find((r) => r.source === 'instagram_ad')!;
+    expect(ig).toMatchObject({ leads: 2, engaged: 1, demos: 1, won: 1, wonInr: 50000, costPerLead: 1500, costPerDemo: 3000, costPerDeal: 3000 });
+    const email = roi.find((r) => r.source === 'cold_email')!;
+    expect(email).toMatchObject({ leads: 0, engaged: 1, demos: 0, costPerLead: null, costPerDemo: null });
+  });
+
+  it('returns every source, even with no activity', () => {
+    expect(channelRoi([], { from, to, spendBySource: {} }).map((r) => r.source)).toEqual(['instagram_ad', 'facebook_ad', 'website', 'whatsapp', 'cold_email']);
+  });
+});
+
+describe('isTestLead', () => {
+  it('flags ZZ Test rows only', async () => {
+    const { isTestLead } = await import('./useSheetLeads');
+    expect(isTestLead({ 'School Name': 'ZZ Test School (social source test)' } as SchoolLeadRow)).toBe(true);
+    expect(isTestLead({ 'School Name': 'zz test' } as SchoolLeadRow)).toBe(true);
+    expect(isTestLead({ 'School Name': 'DPS Indore' } as SchoolLeadRow)).toBe(false);
   });
 });

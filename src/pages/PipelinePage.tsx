@@ -7,7 +7,20 @@ import { Input } from '../components/ui/input';
 import { LeadDrawer } from '../components/sales/LeadDrawer';
 import { useAuth } from '../context/AuthContext';
 import type { SchoolLeadRow } from '../api/sheetsClient';
-import { dealValue, field, formatInr, formatWhen, ownerLabel, pipelineByStage, timeOf, type Stage } from '../lib/pipeline';
+import {
+  SOURCES,
+  SOURCE_LABELS,
+  dealValue,
+  field,
+  formatInr,
+  formatWhen,
+  leadSource,
+  ownerLabel,
+  pipelineByStage,
+  timeOf,
+  type LeadSource,
+  type Stage,
+} from '../lib/pipeline';
 import { useSheetLeads } from '../lib/useSheetLeads';
 
 const COLLAPSED_STAGES: readonly Stage[] = ['Won', 'Lost'];
@@ -20,6 +33,7 @@ export default function PipelinePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [scope, setScope] = useState<'all' | 'mine'>('all');
   const [query, setQuery] = useState('');
+  const [source, setSource] = useState<LeadSource | 'all'>((searchParams.get('source') as LeadSource) || 'all');
   const [showAll, setShowAll] = useState<Partial<Record<Stage, boolean>>>({});
   const { leads, loading, error, reload, replaceLead } = useSheetLeads({ refreshMs: 60_000 });
 
@@ -29,10 +43,11 @@ export default function PipelinePage() {
     const visible = leads.filter(
       (row) =>
         (scope === 'all' || field(row, 'Owner').toLowerCase() === me) &&
+        (source === 'all' || leadSource(row) === source) &&
         (!q || SEARCH_COLUMNS.some((key) => field(row, key).toLowerCase().includes(q)))
     );
     return pipelineByStage(visible);
-  }, [leads, scope, me, query]);
+  }, [leads, scope, me, query, source]);
 
   const leadParam = searchParams.get('lead');
   const openLead = useMemo(
@@ -67,6 +82,17 @@ export default function PipelinePage() {
             onChange={(e) => setQuery(e.target.value)}
             className="h-8 w-48 text-xs"
           />
+          <select
+            value={source}
+            onChange={(e) => setSource(e.target.value as LeadSource | 'all')}
+            className="h-8 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-100"
+            aria-label="Lead source"
+          >
+            <option value="all">All sources</option>
+            {SOURCES.map((key) => (
+              <option key={key} value={key}>{SOURCE_LABELS[key]}</option>
+            ))}
+          </select>
           <div className="flex rounded-lg border border-zinc-700 p-0.5">
             {(['all', 'mine'] as const).map((s) => (
               <button
@@ -127,6 +153,7 @@ export default function PipelinePage() {
                         {field(row, 'City') || '—'}
                         {owner && ` · ${owner === me ? 'you' : ownerLabel(owner)}`}
                         {dealValue(row) > 0 && ` · ${formatInr(dealValue(row))}`}
+                        {leadSource(row) !== 'cold_email' && ` · ${SOURCE_LABELS[leadSource(row)]}`}
                       </p>
                       {field(row, 'Next_step') && (
                         <p className="mt-1.5 truncate text-[10px] text-zinc-300">

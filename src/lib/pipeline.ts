@@ -277,6 +277,82 @@ export function pipelineByStage(rows: SchoolLeadRow[]): StageColumn[] {
   return [...columns.values()];
 }
 
+/** Where a lead came from. Old rows have no Lead_source, so it's inferred from what the funnel wrote. */
+export const SOURCES = ['instagram_ad', 'facebook_ad', 'website', 'whatsapp', 'cold_email'] as const;
+export type LeadSource = (typeof SOURCES)[number];
+
+export const SOURCE_LABELS: Record<LeadSource, string> = {
+  instagram_ad: 'Instagram ad',
+  facebook_ad: 'Facebook ad',
+  website: 'Website',
+  whatsapp: 'WhatsApp',
+  cold_email: 'Cold email',
+};
+
+export function leadSource(row: SchoolLeadRow): LeadSource {
+  const stored = field(row, 'Lead_source').toLowerCase() as LeadSource;
+  if ((SOURCES as readonly string[]).includes(stored)) return stored;
+  const keywords = field(row, 'XR_keywords').toLowerCase();
+  if (keywords.includes('instagram_lead_ad')) return 'instagram_ad';
+  if (keywords.includes('facebook_lead_ad')) return 'facebook_ad';
+  if (field(row, 'Status').toLowerCase() === 'website_lead' || field(row, 'XR_status') === 'Inbound Website Lead') {
+    return 'website';
+  }
+  return 'cold_email';
+}
+
+export type ChannelRoi = {
+  source: LeadSource;
+  leads: number;
+  engaged: number;
+  demos: number;
+  won: number;
+  wonInr: number;
+  spendInr: number;
+  costPerLead: number | null;
+  costPerDemo: number | null;
+  costPerDeal: number | null;
+};
+
+/** When a lead entered the sheet: the form or scrape time, else its first email. */
+export function createdAt(row: SchoolLeadRow): number | null {
+  return timeOf(row, 'Time') ?? timeOf(row, 'Email_sent_at');
+}
+
+/**
+ * Per source, what happened between `from` and `to`: new leads, leads that turned hot, demos booked, deals won and
+ * their ₹, against what the channel cost in that period. Counts are events in the window (like salesKpis).
+ */
+export function channelRoi(
+  rows: SchoolLeadRow[],
+  { from, to, spendBySource }: { from: number; to: number; spendBySource: Partial<Record<LeadSource, number>> }
+): ChannelRoi[] {
+  const within = (t: number | null) => t !== null && t >= from && t < to;
+  const per = new Map<LeadSource, ChannelRoi>(
+    SOURCES.map((source) => [
+      source,
+      { source, leads: 0, engaged: 0, demos: 0, won: 0, wonInr: 0, spendInr: Math.max(0, spendBySource[source] || 0), costPerLead: null, costPerDemo: null, costPerDeal: null },
+    ])
+  );
+  for (const row of rows) {
+    const r = per.get(leadSource(row))!;
+    if (within(createdAt(row))) r.leads += 1;
+    if (within(timeOf(row, 'Hot_at'))) r.engaged += 1;
+    if (within(timeOf(row, 'Demo_booked_at'))) r.demos += 1;
+    if (stageOf(row) === 'Won' && within(timeOf(row, 'Won_at'))) {
+      r.won += 1;
+      r.wonInr += amount(row, 'Paid_amount') || dealValue(row);
+    }
+  }
+  const per1 = (spend: number, n: number) => (spend > 0 && n > 0 ? Math.round(spend / n) : null);
+  return [...per.values()].map((r) => ({
+    ...r,
+    costPerLead: per1(r.spendInr, r.leads),
+    costPerDemo: per1(r.spendInr, r.demos),
+    costPerDeal: per1(r.spendInr, r.won),
+  }));
+}
+
 export function ownerLabel(email: string): string {
   return email ? email.split('@')[0] : '';
 }

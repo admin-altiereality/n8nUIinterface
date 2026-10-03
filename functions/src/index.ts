@@ -26,6 +26,7 @@ import {
   updateEntity,
   verifyMetaSignature,
 } from "./meta";
+import { auditEvents, messageEvents, rowEvents, schoolSummary, sortTimeline, toE164, type TwilioMessage } from "./schools";
 import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefaults, type AppSettings } from "./settings";
 
 setGlobalOptions({ maxInstances: 10 });
@@ -2486,6 +2487,54 @@ app.post("/u/:leadId", async (req, res) => {
       .send(unsubscribePage("Something went wrong", "<p>Please reply &quot;unsubscribe&quot; to our email and we'll remove you.</p>"));
   }
   return res.send(unsubscribePage("You're unsubscribed", "<p>We won't email you again. Sorry for the interruption.</p>"));
+});
+
+// ---- School 360°: every contact and every touch for one school ----
+
+async function twilioMessagesFor(phone: string): Promise<TwilioMessage[]> {
+  const t = getTwilioConfig();
+  if (!t.ok) return [];
+  const auth = twilioBasicAuthHeader(t.accountSid, t.authToken);
+  const get = async (param: "To" | "From") => {
+    const url = new URL(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(t.accountSid)}/Messages.json`);
+    url.searchParams.set(param, `whatsapp:${phone}`);
+    url.searchParams.set("PageSize", "50");
+    const res = await fetch(url.toString(), { headers: { Authorization: auth }, signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { messages?: TwilioMessage[] };
+    return body.messages || [];
+  };
+  const [sent, received] = await Promise.all([get("To").catch(() => []), get("From").catch(() => [])]);
+  return [...sent, ...received];
+}
+
+app.get("/api/schools/:orgKey", requireRoles(SHEETS_ROLES), async (req, res) => {
+  const orgKey = safeText(req.params.orgKey).slice(0, 200);
+  if (!orgKey) return res.status(400).json({ message: "Missing school key." });
+  try {
+    const { rows: all } = await fetchSheetLeadRows({ limit: "5000" });
+    const rows = all.filter((r: Record<string, unknown>) => safeText(r.Org_key) === orgKey || safeText(r.Lead_id) === orgKey);
+    if (!rows.length) return res.status(404).json({ message: "No school with that key." });
+
+    const leadIds = rows.map((r: Record<string, unknown>) => safeText(r.Lead_id)).filter(Boolean).slice(0, 30);
+    const phones = [
+      ...new Set(rows.flatMap((r: Record<string, unknown>) => [toE164(r["Phone number"]), toE164(r.WhatsApp_number)]).filter(Boolean)),
+    ].slice(0, 5) as string[];
+
+    const [auditSnap, messages] = await Promise.all([
+      leadIds.length
+        ? getDataProjectDb().collection(OPS_AUDIT_COLLECTION).where("targetId", "in", leadIds).limit(300).get().catch(() => null)
+        : Promise.resolve(null),
+      Promise.all(phones.map((phone) => twilioMessagesFor(phone).catch(() => []))).then((lists) => lists.flat()),
+    ]);
+    const audit = auditSnap ? auditSnap.docs.map((d) => d.data() as Record<string, unknown>) : [];
+
+    const events = sortTimeline([...rows.flatMap(rowEvents), ...auditEvents(audit), ...messageEvents(messages)]).slice(0, 400);
+    return res.json({ orgKey, ...schoolSummary(rows), phones, events });
+  } catch (err) {
+    logger.error("school timeline failed", err);
+    return res.status(502).json({ message: "Could not build the school timeline." });
+  }
 });
 
 // ---- Settings and system health (Admin page) ----

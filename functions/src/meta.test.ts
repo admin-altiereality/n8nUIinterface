@@ -47,6 +47,7 @@ describe('leadToSalesEvent', () => {
       source: 'instagram_lead_ad',
       utmSource: 'instagram',
       utmCampaign: 'Indore principals',
+      formId: '987',
       submittedAt: '2026-10-03T05:00:00.000Z',
     });
     expect(event.message).toContain('city: Indore');

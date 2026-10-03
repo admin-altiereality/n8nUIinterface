@@ -5,11 +5,16 @@ import { PageHeader } from '../components/layout/PageHeader';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { LeadDrawer } from '../components/sales/LeadDrawer';
+import { ChannelRoiTable } from '../components/sales/ChannelRoiTable';
 import { useAuth } from '../context/AuthContext';
 import { fetchMetaOverview } from '../api/opsClient';
 import { leadPhoneForMessaging, type SchoolLeadRow } from '../api/sheetsClient';
 import {
   QUEUE_SECTIONS,
+  SOURCES,
+  SOURCE_LABELS,
+  leadSource,
+  type LeadSource,
   field,
   formatDuration,
   formatInr,
@@ -46,7 +51,18 @@ export default function SalesHomePage() {
   const me = (user?.email || '').toLowerCase();
   const [searchParams, setSearchParams] = useSearchParams();
   const [scope, setScope] = useState<'all' | 'mine'>('all');
-  const { leads, loading, error, fetchedAt, reload, replaceLead } = useSheetLeads({ refreshMs: REFRESH_MS });
+  const { leads: allLeads, loading, error, fetchedAt, reload, replaceLead } = useSheetLeads({ refreshMs: REFRESH_MS });
+  // The source chips narrow the queue, KPIs and funnel; the Channels table always compares every source.
+  const [source, setSource] = useState<LeadSource | 'all'>('all');
+  const leads = useMemo(
+    () => (source === 'all' ? allLeads : allLeads.filter((row) => leadSource(row) === source)),
+    [allLeads, source]
+  );
+  const sourceCounts = useMemo(() => {
+    const counts: Partial<Record<LeadSource, number>> = {};
+    for (const row of allLeads) counts[leadSource(row)] = (counts[leadSource(row)] || 0) + 1;
+    return counts;
+  }, [allLeads]);
   const { update, busy, error: actionError } = useLeadUpdate(replaceLead);
 
   // Re-anchor "now" whenever the leads change so due and overdue labels keep up with the clock.
@@ -75,8 +91,8 @@ export default function SalesHomePage() {
 
   const leadParam = searchParams.get('lead');
   const openLead = useMemo(
-    () => (leadParam ? leads.find((row) => field(row, 'Lead_id') === leadParam) || null : null),
-    [leads, leadParam]
+    () => (leadParam ? allLeads.find((row) => field(row, 'Lead_id') === leadParam) || null : null),
+    [allLeads, leadParam]
   );
   const openDrawer = (row: SchoolLeadRow) => {
     const id = field(row, 'Lead_id');
@@ -217,6 +233,25 @@ export default function SalesHomePage() {
         </div>
       )}
 
+      <div className="mb-4 flex flex-wrap items-center gap-1.5 text-[11px]">
+        {(['all', ...SOURCES] as const).map((key) => {
+          const count = key === 'all' ? allLeads.length : sourceCounts[key] || 0;
+          if (key !== 'all' && !count) return null;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setSource(key)}
+              className={`rounded-full border px-2.5 py-1 ${
+                source === key ? 'border-indigo-500/50 bg-indigo-500/20 text-indigo-200' : 'border-zinc-700 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {key === 'all' ? 'All sources' : SOURCE_LABELS[key]} <span className="text-zinc-500">{count}</span>
+            </button>
+          );
+        })}
+      </div>
+
       <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-5">
         <Kpi
           label="Open pipeline"
@@ -264,6 +299,8 @@ export default function SalesHomePage() {
           })}
         </div>
       </div>
+
+      <ChannelRoiTable leads={allLeads} settings={settings} canSeeAds={canSeeAds} />
 
       <div className="space-y-5">
         {QUEUE_SECTIONS.map((section) =>

@@ -21,6 +21,8 @@ import {
   stageOf,
   timeOf,
   whatsappWindowLeftMs,
+  SOURCE_LABELS,
+  leadSource,
 } from '../../lib/pipeline';
 import { useLeadUpdate } from '../../lib/useLeadUpdate';
 
@@ -176,8 +178,20 @@ export function LeadDrawer({ lead, onClose, onChange }: Props) {
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-zinc-100">{field(lead, 'School Name') || 'Lead'}</h2>
               <p className="text-[11px] text-zinc-500">
-                {field(lead, 'City') || '—'} · <span className="text-zinc-300">{stage}</span>
+                {field(lead, 'City') || '—'} · <span className="text-zinc-300">{stage}</span> · {SOURCE_LABELS[leadSource(lead)]}
               </p>
+              {(field(lead, 'Lead_campaign') || field(lead, 'Lead_form')) && (
+                <p className="truncate text-[10px] text-zinc-500">
+                  {[field(lead, 'Lead_campaign') && `Campaign: ${field(lead, 'Lead_campaign')}`, field(lead, 'Lead_form') && `Form: ${field(lead, 'Lead_form')}`]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </p>
+              )}
+              {field(lead, 'Org_key') && (
+                <Link to={`/schools/${encodeURIComponent(field(lead, 'Org_key'))}`} className="text-[10px] text-sky-400 hover:underline">
+                  School page and full timeline →
+                </Link>
+              )}
             </div>
             <button type="button" onClick={onClose} className="p-1 text-zinc-500 hover:text-zinc-300" aria-label="Close">
               <X className="h-4 w-4" />

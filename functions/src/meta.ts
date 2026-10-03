@@ -306,6 +306,7 @@ export function leadToSalesEvent(lead: any) {
     message: [pick("city") ? `city: ${pick("city")}` : "", lead?.form_id ? `form: ${lead.form_id}` : ""].filter(Boolean).join(" | "),
     utmSource: platform,
     utmCampaign: String(lead?.campaign_name || ""),
+    formId: String(lead?.form_id || ""),
     submittedAt: lead?.created_time ? new Date(lead.created_time).toISOString() : new Date().toISOString(),
   };
 }

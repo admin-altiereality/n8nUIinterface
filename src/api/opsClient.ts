@@ -228,7 +228,7 @@ export async function downloadOpsCsv(): Promise<Blob> {
 
 // ---- Social Ads (Meta) ----
 
-export type MetaRange = 'last_7d' | 'last_28d' | 'last_90d' | 'this_month';
+export type MetaRange = 'last_7d' | 'last_28d' | 'last_90d' | 'this_month' | 'last_month';
 
 export type MetaInsights = {
   spend: number;
@@ -377,5 +377,35 @@ export async function updateSettings(patch: Partial<AppSettings>): Promise<AppSe
 export async function fetchAdminHealth(): Promise<AdminHealth> {
   const res = await fetchWithAuthRetry(opsUrl('/api/admin/health'));
   if (!res.ok) await parseError(res, 'Could not load system health.');
+  return res.json();
+}
+
+// ---- School 360° ----
+
+export type TimelineEvent = {
+  at: string;
+  kind: 'lead' | 'email' | 'whatsapp' | 'form' | 'deal' | 'note' | 'system';
+  title: string;
+  detail?: string;
+  leadId?: string;
+  actor?: string;
+};
+
+export type SchoolContact = { leadId: string; name: string; email: string; phone: string; stage: string; owner: string; source: string };
+
+export type School360 = {
+  orgKey: string;
+  name: string;
+  city: string;
+  website: string;
+  board: string;
+  contacts: SchoolContact[];
+  phones: string[];
+  events: TimelineEvent[];
+};
+
+export async function fetchSchool(orgKey: string): Promise<School360> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/schools/${encodeURIComponent(orgKey)}`));
+  if (!res.ok) await parseError(res, 'Could not load this school.');
   return res.json();
 }
