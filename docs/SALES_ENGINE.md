@@ -107,3 +107,28 @@ Every webhook needs the `X-Altie-Key` header (n8n credential "Altie Function Key
      Claude can do this for you.
 6. **Deploy:** `firebase deploy --only functions,hosting --project lexrn1`. Then send a test lead with Meta's Lead Ads
    Testing Tool and check that the row and the alert arrive.
+
+## Dashboard pages (2026-10-03)
+
+| Page | For | What it does |
+|---|---|---|
+| Sales Home `/sales` | sales | Today queue and KPIs. Source chips (Instagram ad, Facebook ad, website, WhatsApp, cold email) narrow everything. The **Channels** table shows leads → engaged → demos → won and cost per lead, demo and deal for each source. |
+| Pipeline `/pipeline` | sales | Every school by stage, with a source filter and source badges. |
+| School `/schools/:orgKey` | sales | Every contact at a school and one timeline: city run or form, emails, opens, clicks, replies, WhatsApp both ways, notes, stage changes, demo, proposal, won/lost, unsubscribe. The lead drawer links to it. |
+| Social Ads `/social` | superadmin, associate | Meta ad numbers, live or as the daily snapshot Claude pulls through the Meta Ads MCP. |
+| Admin `/admin` | superadmin | Health of the 4 workflows (manual editor runs don't count), cold emails today vs. the cap, WhatsApp failures, approved templates, Meta mode. **Settings:** monthly target, monthly cost per channel, email cap and follow-up share, test/live for auto-replies and the WhatsApp welcome, Meta budget ceiling, alert recipients. |
+
+**How Settings reach n8n.** Settings are stored in Firestore `settings/app`, and n8n reads them from
+`GET /api/internal/settings` (X-Altie-Key):
+- Outbound `Load Settings` and `Load Settings (follow-ups)` set the caps;
+- Inbound `Load Settings` sets the auto-reply mode;
+- Alerts `Load Recipients` sets who gets alerts.
+
+Every one falls back to the old built-in values if the call fails.
+
+**Lead source.** The sheet columns `Lead_source`, `Lead_campaign`, `Lead_form` and `Leadgen_id` are written by:
+- Outbound, which sets `cold_email`;
+- the Inbound form path, which sets `website`, `instagram_ad` or `facebook_ad`.
+
+A form lead with an email or phone we already have updates that school's row (Engaged, hot, next step) instead of
+adding a new row. The same Meta lead seen twice is skipped.
