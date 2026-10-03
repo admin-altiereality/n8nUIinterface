@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { AlarmClock, Check, Loader2, MessageCircle, Phone, RefreshCw } from 'lucide-react';
 import { PageHeader } from '../components/layout/PageHeader';
@@ -6,6 +6,7 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { LeadDrawer } from '../components/sales/LeadDrawer';
 import { useAuth } from '../context/AuthContext';
+import { fetchMetaOverview } from '../api/opsClient';
 import { leadPhoneForMessaging, type SchoolLeadRow } from '../api/sheetsClient';
 import {
   MONTHLY_TARGET_INR,
@@ -54,7 +55,19 @@ export default function SalesHomePage() {
     () => todayQueue(leads, { now, owner: scope === 'mine' ? me : undefined }),
     [leads, now, scope, me]
   );
-  const kpis = useMemo(() => salesKpis(leads, { now }), [leads, now]);
+  // Meta ad spend this month, for cost per demo; only roles that may read Social Ads can fetch it.
+  const [metaSpend, setMetaSpend] = useState<number | null>(null);
+  const canSeeAds = user?.role === 'superadmin' || user?.role === 'associate';
+  useEffect(() => {
+    if (!canSeeAds) return;
+    fetchMetaOverview('this_month')
+      .then((o) => setMetaSpend(o.spend))
+      .catch(() => setMetaSpend(null)); // Meta not connected yet: keep the configured spend
+  }, [canSeeAds]);
+  const kpis = useMemo(
+    () => salesKpis(leads, { now, ...(metaSpend ? { spendInr: metaSpend } : {}) }),
+    [leads, now, metaSpend]
+  );
   const funnel = useMemo(() => funnelConversion(leads), [leads]);
   const queueSize = QUEUE_SECTIONS.reduce((n, s) => n + queue[s.key].length, 0);
 
@@ -230,7 +243,7 @@ export default function SalesHomePage() {
         <Kpi
           label="Cost per demo"
           value={kpis.costPerDemo !== null ? formatInr(kpis.costPerDemo) : '—'}
-          sub={kpis.costPerDemo !== null ? 'This month' : 'Monthly spend not set yet'}
+          sub={kpis.costPerDemo !== null ? (metaSpend ? 'Meta ad spend this month' : 'This month') : 'Monthly spend not set yet'}
         />
       </div>
 

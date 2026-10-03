@@ -197,7 +197,7 @@ export default function OpsDashboardPage() {
                 <p className="mt-1 text-[11px] text-red-200/80">
                   {item.errorCode ? `Twilio ${String(item.errorCode)}` : String(item.twilioCode || item.twilioMessage || 'No error code')}
                 </p>
-                {item.updatedAt && <p className="mt-1 text-[10px] text-red-200/60">{shortDate(item.updatedAt)}</p>}
+                {item.updatedAt ? <p className="mt-1 text-[10px] text-red-200/60">{shortDate(item.updatedAt)}</p> : null}
               </div>
             )) : <EmptyState text="No failed sends logged" />}
           </CardContent>

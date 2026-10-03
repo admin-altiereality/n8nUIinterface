@@ -10,6 +10,23 @@ import cors from "cors";
 import express from "express";
 import { defineSecret } from "firebase-functions/params";
 import { createHmac, timingSafeEqual } from "crypto";
+import {
+  META_AD_ACCOUNT_ID,
+  META_MAX_DAILY_BUDGET_INR,
+  META_RANGES,
+  MetaApiError,
+  type MetaCreds,
+  boostInstagramPost,
+  fetchLead,
+  getOverview,
+  leadToSalesEvent,
+  listCampaigns,
+  listInstagramMedia,
+  parseBoostRequest,
+  parseEntityChange,
+  updateEntity,
+  verifyMetaSignature,
+} from "./meta";
 
 setGlobalOptions({ maxInstances: 10 });
 
@@ -34,6 +51,13 @@ const twilioAuthTokenSecret = defineSecret("TWILIO_AUTH_TOKEN");
 const twilioMessagingServiceSidSecret = defineSecret("TWILIO_MESSAGING_SERVICE_SID_SECRET");
 const twilioWhatsappFromSecret = defineSecret("TWILIO_WHATSAPP_FROM_SECRET");
 
+/** Meta system-user token (ads_management, ads_read, leads_retrieval, pages and Instagram read). */
+const metaSystemTokenSecret = defineSecret("META_SYSTEM_TOKEN");
+/** The Meta app's secret: signs webhook payloads and the appsecret_proof on API calls. */
+const metaAppSecret = defineSecret("META_APP_SECRET");
+/** The token typed into the Meta app's webhook setup; Meta echoes it on the verify call. */
+const metaVerifyTokenSecret = defineSecret("META_VERIFY_TOKEN");
+
 const AUTH_FIREBASE_PROJECT_ID =
   process.env.AUTH_FIREBASE_PROJECT_ID || "learnxr-evoneuralai";
 
@@ -52,6 +76,9 @@ const N8N_ROLES = new Set(["superadmin", "associate", "builder"]);
 const SALES_N8N_ROLES = new Set(["superadmin", "associate", "salesperson"]);
 const SHEETS_ROLES = new Set(["superadmin", "associate", "salesperson"]);
 const OPS_ROLES = new Set(["superadmin", "associate", "salesperson", "whatsapp_manager"]);
+/** Social Ads: associates can watch; only superadmins can spend (pause/resume, budgets, boosts). */
+const META_ROLES = new Set(["superadmin", "associate"]);
+const META_WRITE_ROLES = new Set(["superadmin"]);
 
 const SALES_FUNNEL_WORKFLOW_ID =
   process.env.N8N_SALES_WORKFLOW_ID || "6pBPEDzIfj8939GG";
@@ -2459,6 +2486,144 @@ app.post("/u/:leadId", async (req, res) => {
   return res.send(unsubscribePage("You're unsubscribed", "<p>We won't email you again. Sorry for the interruption.</p>"));
 });
 
+// ---- Meta (Instagram/Facebook) ads: Social Ads page and lead-ads webhook ----
+
+function getMetaCreds(): MetaCreds | null {
+  const token = metaSystemTokenSecret.value();
+  const appSecret = metaAppSecret.value();
+  // The secrets must exist for deploys to work, so "unset" placeholders mean Meta isn't connected yet.
+  return token && appSecret && token !== "unset" && appSecret !== "unset" ? { token, appSecret } : null;
+}
+
+function metaRange(req: express.Request): string {
+  const range = typeof req.query.range === "string" ? req.query.range : "last_28d";
+  return META_RANGES.has(range) ? range : "last_28d";
+}
+
+function sendMetaError(res: express.Response, err: unknown, what: string) {
+  if (err instanceof MetaApiError) {
+    logger.warn(`Meta ${what} failed`, { status: err.status, code: err.code, message: err.message });
+    // Meta's 4xx usually means a setup or permission problem the page can show as is.
+    return res.status(err.status >= 400 && err.status < 500 ? 400 : 502).json({ message: err.message });
+  }
+  logger.error(`Meta ${what} failed`, err);
+  return res.status(502).json({ message: `Could not reach Meta (${what}).` });
+}
+
+/** Cached for 5 minutes: insights refresh slowly and the page polls on every visit. */
+const metaCache = new Map<string, { at: number; data: unknown }>();
+async function metaCached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const hit = metaCache.get(key);
+  if (hit && Date.now() - hit.at < 5 * 60_000) return hit.data as T;
+  const data = await load();
+  metaCache.set(key, { at: Date.now(), data });
+  return data;
+}
+
+app.get("/api/meta/overview", requireRoles(META_ROLES), async (req, res) => {
+  const creds = getMetaCreds();
+  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+  const range = metaRange(req);
+  try {
+    return res.json({ range, accountId: META_AD_ACCOUNT_ID, ...(await metaCached(`overview:${range}`, () => getOverview(creds, range))) });
+  } catch (err) {
+    return sendMetaError(res, err, "overview");
+  }
+});
+
+app.get("/api/meta/campaigns", requireRoles(META_ROLES), async (req, res) => {
+  const creds = getMetaCreds();
+  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+  const range = metaRange(req);
+  try {
+    const fresh = req.query.fresh === "1";
+    const campaigns = fresh ? await listCampaigns(creds, range) : await metaCached(`campaigns:${range}`, () => listCampaigns(creds, range));
+    if (fresh) metaCache.set(`campaigns:${range}`, { at: Date.now(), data: campaigns });
+    return res.json({ range, accountId: META_AD_ACCOUNT_ID, maxDailyBudget: META_MAX_DAILY_BUDGET_INR, campaigns });
+  } catch (err) {
+    return sendMetaError(res, err, "campaigns");
+  }
+});
+
+app.get("/api/meta/ig-media", requireRoles(META_ROLES), async (_req, res) => {
+  const creds = getMetaCreds();
+  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+  try {
+    return res.json({ media: await metaCached("ig-media", () => listInstagramMedia(creds)) });
+  } catch (err) {
+    return sendMetaError(res, err, "Instagram posts");
+  }
+});
+
+app.patch("/api/meta/entities/:id", requireRoles(META_WRITE_ROLES), async (req, res) => {
+  const creds = getMetaCreds();
+  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+  const change = parseEntityChange(req.body);
+  if (typeof change === "string") return res.status(400).json({ message: change });
+  const id = safeText(req.params.id);
+  try {
+    const result = await updateEntity(creds, id, change);
+    metaCache.clear();
+    await writeOpsAudit({ action: "meta.entity.update", auth: getAuthedUser(req), targetId: id, details: { ...change } });
+    return res.json(result);
+  } catch (err) {
+    return sendMetaError(res, err, "update");
+  }
+});
+
+app.post("/api/meta/boost", requireRoles(META_WRITE_ROLES), async (req, res) => {
+  const creds = getMetaCreds();
+  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+  const boost = parseBoostRequest(req.body);
+  if (typeof boost === "string") return res.status(400).json({ message: boost });
+  const auth = getAuthedUser(req);
+  try {
+    const result = await boostInstagramPost(creds, boost, auth?.email || auth?.uid || "unknown");
+    metaCache.clear();
+    await writeOpsAudit({
+      action: "meta.boost.create",
+      auth,
+      targetId: result.campaignId,
+      details: { ...boost, adsetId: result.adsetId, adId: result.adId },
+    });
+    return res.status(201).json(result);
+  } catch (err) {
+    return sendMetaError(res, err, "boost");
+  }
+});
+
+// Meta calls this once when the webhook is set up in the app dashboard.
+app.get("/api/meta/webhook", (req, res) => {
+  const expected = metaVerifyTokenSecret.value();
+  if (req.query["hub.mode"] === "subscribe" && expected && req.query["hub.verify_token"] === expected) {
+    return res.status(200).send(String(req.query["hub.challenge"] || ""));
+  }
+  return res.status(403).send("Forbidden");
+});
+
+app.post("/api/meta/webhook", async (req, res) => {
+  const creds = getMetaCreds();
+  const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody;
+  if (!creds || !verifyMetaSignature(rawBody, req.get("x-hub-signature-256"), creds.appSecret)) {
+    return res.status(401).send("Bad signature");
+  }
+  const leadIds: string[] = [];
+  for (const entry of Array.isArray(req.body?.entry) ? req.body.entry : []) {
+    for (const change of Array.isArray(entry?.changes) ? entry.changes : []) {
+      if (change?.field === "leadgen" && change.value?.leadgen_id) leadIds.push(String(change.value.leadgen_id));
+    }
+  }
+  // Meta retries anything that isn't a quick 200, so failures are logged rather than returned.
+  for (const leadgenId of leadIds) {
+    try {
+      await forwardSalesEvent(leadToSalesEvent(await fetchLead(creds, leadgenId)));
+    } catch (err) {
+      logger.error("Meta lead fetch failed", { leadgenId, error: String(err) });
+    }
+  }
+  return res.status(200).send("ok");
+});
+
 // Auth-gated fallback for hosting rewrite path variants (n8n only)
 app.get(/.*/, async (req, res) => {
   const originalUrl = req.originalUrl || req.url || "";
@@ -2559,6 +2724,9 @@ export const api = onRequest(
       twilioAuthTokenSecret,
       twilioMessagingServiceSidSecret,
       twilioWhatsappFromSecret,
+      metaSystemTokenSecret,
+      metaAppSecret,
+      metaVerifyTokenSecret,
     ],
   },
   app

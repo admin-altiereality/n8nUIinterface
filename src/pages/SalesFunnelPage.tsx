@@ -197,6 +197,7 @@ export default function SalesFunnelPage() {
   const [pollingExecutionId, setPollingExecutionId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [recentN8n, setRecentN8n] = useState<N8nExecutionListItem[]>([]);
+  const [lastFollowUpRun, setLastFollowUpRun] = useState<N8nExecutionListItem | null>(null);
   const [recentN8nLoading, setRecentN8nLoading] = useState(false);
   const [recentN8nError, setRecentN8nError] = useState<string | null>(null);
   const [recentN8nSource, setRecentN8nSource] = useState<'n8n' | 'firestore' | 'unknown'>('unknown');
@@ -270,7 +271,9 @@ export default function SalesFunnelPage() {
     try {
       const list = await listSalesExecutions(15, SALES_WORKFLOW_ID);
       if (list) {
-        setRecentN8n(list);
+        // The daily follow-up emails run in the same workflow on a schedule ("trigger" mode); city runs come in by webhook.
+        setRecentN8n(list.filter((item) => item.mode !== 'trigger'));
+        setLastFollowUpRun(list.find((item) => item.mode === 'trigger') ?? null);
         setRecentN8nSource(lastSalesExecutionsMeta.source);
         if (lastSalesExecutionsMeta.warning) {
           setRecentN8nError(lastSalesExecutionsMeta.warning);
@@ -845,6 +848,11 @@ export default function SalesFunnelPage() {
               <div className="mb-3 rounded-md border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-[11px] text-sky-200">
                 Showing stored sales runs while n8n API access is unavailable.
               </div>
+            )}
+            {lastFollowUpRun && (
+              <p className="mb-3 text-[11px] text-zinc-500">
+                Daily follow-ups last ran {new Date(lastFollowUpRun.startedAt).toLocaleString()} · {lastFollowUpRun.status}
+              </p>
             )}
             <div className="space-y-2 max-h-[220px] overflow-y-auto">
               {recentN8n.map((item) => (

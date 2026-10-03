@@ -225,3 +225,93 @@ export async function downloadOpsCsv(): Promise<Blob> {
   }
   return await res.blob();
 }
+
+// ---- Social Ads (Meta) ----
+
+export type MetaRange = 'last_7d' | 'last_28d' | 'last_90d' | 'this_month';
+
+export type MetaInsights = {
+  spend: number;
+  reach: number;
+  impressions: number;
+  clicks: number;
+  leads: number;
+  costPerLead: number | null;
+};
+
+export type MetaAdset = { id: string; name: string; status: string; effectiveStatus: string; dailyBudget: number | null };
+
+export type MetaCampaign = {
+  id: string;
+  name: string;
+  objective: string;
+  status: string;
+  effectiveStatus: string;
+  dailyBudget: number | null;
+  lifetimeBudget: number | null;
+  createdAt: string;
+  insights: MetaInsights;
+  adsets: MetaAdset[];
+};
+
+export type MetaIgPost = {
+  id: string;
+  caption: string;
+  mediaType: string;
+  imageUrl?: string;
+  permalink: string;
+  timestamp: string;
+  likes: number;
+  comments: number;
+};
+
+export type MetaBoostRequest = {
+  igMediaId: string;
+  goal: 'visits' | 'engagement';
+  dailyBudget: number;
+  days: number;
+  cities: string[];
+  ageMin: number;
+};
+
+export type MetaBoostResult = { campaignId: string; adsetId: string; adId: string; name: string; previewHtml: string };
+
+export async function fetchMetaOverview(range: MetaRange): Promise<MetaInsights & { accountId: string }> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/meta/overview?range=${range}`));
+  if (!res.ok) await parseError(res, 'Could not load Meta overview.');
+  return res.json();
+}
+
+export async function fetchMetaCampaigns(
+  range: MetaRange,
+  fresh = false
+): Promise<{ accountId: string; maxDailyBudget: number; campaigns: MetaCampaign[] }> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/meta/campaigns?range=${range}${fresh ? '&fresh=1' : ''}`));
+  if (!res.ok) await parseError(res, 'Could not load Meta campaigns.');
+  return res.json();
+}
+
+export async function fetchMetaIgPosts(): Promise<MetaIgPost[]> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/meta/ig-media'));
+  if (!res.ok) await parseError(res, 'Could not load Instagram posts.');
+  return ((await res.json()) as { media: MetaIgPost[] }).media;
+}
+
+export async function updateMetaEntity(id: string, change: { status?: 'ACTIVE' | 'PAUSED'; dailyBudget?: number }): Promise<void> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/meta/entities/${encodeURIComponent(id)}`), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(change),
+  });
+  if (!res.ok) await parseError(res, 'Meta did not accept the change.');
+}
+
+export async function boostMetaIgPost(req: MetaBoostRequest): Promise<MetaBoostResult> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/meta/boost'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) await parseError(res, 'Could not create the boost.');
+  return res.json();
+}

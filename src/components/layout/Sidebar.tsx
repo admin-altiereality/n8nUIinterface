@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Zap,
+  Megaphone,
 } from 'lucide-react';
 
 interface NavItem {
@@ -47,6 +48,12 @@ const NAV_ITEMS: NavItem[] = [
     path: '/sales-funnel',
     icon: <Target className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Social Ads',
+    path: '/social',
+    icon: <Megaphone className="w-5 h-5" />,
+    roles: ['superadmin', 'associate'],
   },
   {
     label: 'Messaging',
