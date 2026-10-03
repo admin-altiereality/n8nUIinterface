@@ -66,14 +66,16 @@ Every webhook needs the `X-Altie-Key` header (n8n credential "Altie Function Key
 
 ### One-time Meta setup (owner: you)
 
-1. **Business Settings → altie_reality**
-   - Link the LearnXR Facebook Page and the Instagram professional account to ad account `1210737851250614`.
-   - Give yourself **Advertiser** (or Admin) access on that ad account. Today it shows "(Read-Only)", and no Page or
-     Instagram account is linked.
+1. **Ad account and Page** (picked 2026-10-03): ad account `784451571902986` ("Gaurav Purbia", INR) with the
+   **Altie Reality** Page `112468273892432`.
+   - This is the account that ran the past LearnXR Instagram boosts, and it is the only one with a Page linked. The
+     altie_reality business accounts are "(Read-Only)" with no Page.
+   - In Business Settings, connect the LearnXR Instagram professional account to the Altie Reality Page (Page →
+     Linked accounts → Instagram). The Meta tools currently see no Instagram account on this ad account.
 2. **developers.facebook.com → Create app (Business)**
    - Add **Marketing API** and **Webhooks**. Note the **App secret**.
 3. **Business Settings → System users → Add** (Admin)
-   - Assign the ad account (Manage campaigns), the Page and the Instagram account.
+   - Assign the ad account (Manage campaigns), the Page and the Instagram account. A personal ad account can only be assigned to a system user once it has been added to the business; if that isn't possible, generate a long-lived **user** token from the app instead.
    - **Generate token** for the app with these scopes, set never to expire: `ads_management`, `ads_read`,
      `business_management`, `pages_show_list`, `pages_read_engagement`, `pages_manage_metadata`, `leads_retrieval`,
      `instagram_basic`.
@@ -88,7 +90,7 @@ Every webhook needs the `X-Altie-Key` header (n8n credential "Altie Function Key
    ```bash
    firebase functions:secrets:set META_VERIFY_TOKEN --project lexrn1
    ```
-   Put `META_PAGE_ID=<page id>` in `functions/.env`. Optional settings there: `META_MAX_DAILY_BUDGET_INR` and
+   These defaults are already in the code; override them in `functions/.env` only if needed: `META_AD_ACCOUNT_ID`, `META_PAGE_ID`, `META_MAX_DAILY_BUDGET_INR` and
    `META_BOOST_LINK`.
 5. **Lead ads**
    - Accept the Lead Gen terms for the Page (facebook.com/legal/leadgen/tos).

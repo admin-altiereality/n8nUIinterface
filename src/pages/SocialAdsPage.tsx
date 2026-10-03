@@ -286,7 +286,7 @@ export default function SocialAdsPage() {
 
   return (
     <div>
-      <PageHeader title="Social Ads" subtitle="Instagram and Facebook campaigns for the altie_reality ad account">
+      <PageHeader title="Social Ads" subtitle="Instagram and Facebook campaigns for the Altie Reality Page">
         <div className="flex items-center gap-2">
           <select
             value={range}
