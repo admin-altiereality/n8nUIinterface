@@ -17,6 +17,7 @@ import {
   Megaphone,
   Settings,
   Users,
+  HeartHandshake,
 } from 'lucide-react';
 
 interface NavItem {
@@ -43,6 +44,12 @@ const NAV_ITEMS: NavItem[] = [
     label: 'Pipeline',
     path: '/pipeline',
     icon: <Columns3 className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Customers',
+    path: '/customers',
+    icon: <HeartHandshake className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'salesperson'],
   },
   {

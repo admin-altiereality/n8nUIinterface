@@ -358,6 +358,8 @@ export type WorkflowHealth = {
 
 export type AdminHealth = {
   checkedAt: string;
+  /** Whether the API can read LearnXR product data (customer health, report sign-ups). */
+  productAccess: boolean;
   workflows: WorkflowHealth[];
   email: { sentToday: number | null; cap: number };
   whatsapp: { failed24h: number | null; approvedTemplates: number | null };
@@ -400,8 +402,30 @@ export type TimelineEvent = {
 
 export type SchoolContact = { leadId: string; name: string; email: string; phone: string; stage: string; owner: string; source: string };
 
+export type CustomerHealth = {
+  teachers: number;
+  activeTeachers: number;
+  students: number;
+  activeStudents: number;
+  score: number;
+  band: 'healthy' | 'watch' | 'at risk' | 'not started';
+  renewalAt: string | null;
+  daysToRenewal: number | null;
+};
+
+export type ProductSchoolSuggestion = { id: string; name: string; city: string; website: string; phone: string; score: number; reasons: string[] };
+
+export type CustomerBlock = {
+  link: { productSchoolId: string; productSchoolName?: string; renewalAt?: string | null; linkedBy?: string; linkedAt?: string } | null;
+  suggestions: ProductSchoolSuggestion[];
+  health: CustomerHealth | null;
+  renewalAt: number | null;
+  productAccess: boolean;
+};
+
 export type School360 = {
   orgKey: string;
+  customer: CustomerBlock | null;
   name: string;
   city: string;
   website: string;
@@ -437,4 +461,23 @@ export async function fetchLeaderboard(days: number): Promise<{ days: number; fr
   const res = await fetchWithAuthRetry(opsUrl(`/api/team/leaderboard?days=${days}`));
   if (!res.ok) await parseError(res, 'Could not load the leaderboard.');
   return res.json();
+}
+
+// ---- Customers (after-sale) ----
+
+export type Customer = CustomerBlock & { orgKey: string; name: string; city: string; wonAt: string; value: number; owner: string };
+
+export async function fetchCustomers(): Promise<Customer[]> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/customers'));
+  if (!res.ok) await parseError(res, 'Could not load customers.');
+  return ((await res.json()) as { customers: Customer[] }).customers;
+}
+
+export async function linkCustomer(orgKey: string, change: { productSchoolId?: string; renewalAt?: string; unlink?: boolean }): Promise<void> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/schools/${encodeURIComponent(orgKey)}/link`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(change),
+  });
+  if (!res.ok) await parseError(res, 'Could not save the link.');
 }

@@ -11,6 +11,7 @@ import SocialAdsPage from './pages/SocialAdsPage';
 import AdminPage from './pages/AdminPage';
 import SchoolPage from './pages/SchoolPage';
 import TeamPage from './pages/TeamPage';
+import CustomersPage from './pages/CustomersPage';
 import LoginPage from './pages/LoginPage';
 import { AuthProvider } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -107,6 +108,16 @@ const App: React.FC = () => {
             <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
               <AppLayout>
                 <SchoolPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/customers"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <CustomersPage />
               </AppLayout>
             </ProtectedRoute>
           }

@@ -153,6 +153,16 @@ export default function AdminPage() {
         />
       </div>
 
+      {health && !health.productAccess && (
+        <div className="mb-6 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+          The dashboard can't read LearnXR product data (customer health, report-download leads). A Google Cloud owner of
+          learnxr-evoneuralai can allow it with:
+          <code className="mt-1 block select-all rounded bg-zinc-900 px-2 py-1 text-zinc-200">
+            gcloud projects add-iam-policy-binding learnxr-evoneuralai --member=serviceAccount:1074016177582-compute@developer.gserviceaccount.com --role=roles/datastore.viewer
+          </code>
+        </div>
+      )}
+
       <div className="surface-card mb-6 p-4">
         <h2 className="mb-3 text-xs font-semibold text-zinc-200">Workflows</h2>
         <div className="grid gap-3 md:grid-cols-2">

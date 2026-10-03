@@ -5,6 +5,8 @@ import { PageHeader } from '../components/layout/PageHeader';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { LeadDrawer } from '../components/sales/LeadDrawer';
+import { CustomerPanel } from '../components/sales/CustomerPanel';
+import { useAuth } from '../context/AuthContext';
 import { fetchSchool, type School360, type TimelineEvent } from '../api/opsClient';
 import { SOURCE_LABELS, field, formatWhen, ownerLabel, type LeadSource } from '../lib/pipeline';
 import { useSheetLeads } from '../lib/useSheetLeads';
@@ -36,6 +38,8 @@ export default function SchoolPage() {
   const [loading, setLoading] = useState(false);
   const [kind, setKind] = useState<(typeof KINDS)[number]['key']>('all');
   const { leads, replaceLead } = useSheetLeads();
+  const { user } = useAuth();
+  const canEdit = user?.role === 'superadmin' || user?.role === 'associate';
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -95,6 +99,8 @@ export default function SchoolPage() {
       </PageHeader>
 
       {error && <div className="mb-4 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">{error}</div>}
+
+      {school?.customer && <CustomerPanel orgKey={school.orgKey} customer={school.customer} canEdit={canEdit} onChanged={() => void load()} />}
 
       <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
         <div className="surface-card h-fit p-4">

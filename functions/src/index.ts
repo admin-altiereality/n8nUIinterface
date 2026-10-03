@@ -27,6 +27,14 @@ import {
   verifyMetaSignature,
 } from "./meta";
 import { auditEvents, messageEvents, rowEvents, schoolSummary, sortTimeline, toE164, type TwilioMessage } from "./schools";
+import {
+  customerHealth,
+  defaultRenewalAt,
+  formSpamReason,
+  renewalReminderDue,
+  suggestProductSchools,
+  type ProductSchool,
+} from "./customers";
 import { CALL_OUTCOMES, leaderboard, slaAlert, slaBreaches, weeklyDigest } from "./team";
 import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefaults, type AppSettings } from "./settings";
 
@@ -2535,11 +2543,283 @@ app.get("/api/schools/:orgKey", requireRoles(SHEETS_ROLES), async (req, res) => 
     const audit = auditSnap ? auditSnap.docs.map((d) => d.data() as Record<string, unknown>) : [];
 
     const events = sortTimeline([...rows.flatMap(rowEvents), ...auditEvents(audit), ...messageEvents(messages)]).slice(0, 400);
-    return res.json({ orgKey, ...schoolSummary(rows), phones, events });
+    const customer = await customerBlock(orgKey, rows).catch(() => null);
+    return res.json({ orgKey, ...schoolSummary(rows), phones, events, customer });
   } catch (err) {
     logger.error("school timeline failed", err);
     return res.status(502).json({ message: "Could not build the school timeline." });
   }
+});
+
+// ---- After-sale: link won schools to the LearnXR product, usage health, renewals ----
+
+/** The LearnXR product's Firestore (schools, classes, lesson launches). Needs datastore.viewer for this function. */
+function getProductDb() {
+  const { getFirestore } = adminFirestoreModule();
+  return getFirestore(getAuthProjectApp());
+}
+
+const CUSTOMER_LINKS = "customerLinks";
+const linkDocId = (orgKey: string) => orgKey.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200);
+
+function millis(v: unknown): number | null {
+  if (!v) return null;
+  if (typeof (v as { toMillis?: () => number }).toMillis === "function") return (v as { toMillis: () => number }).toMillis();
+  const t = Date.parse(String(v));
+  return Number.isFinite(t) ? t : null;
+}
+
+async function loadProductSchools(): Promise<ProductSchool[]> {
+  const snap = await getProductDb().collection("schools").limit(500).get();
+  return snap.docs.map((d) => {
+    const x = d.data() as Record<string, unknown>;
+    return { id: d.id, name: safeText(x.name), city: safeText(x.city), website: safeText(x.website), phone: safeText(x.contactPhone) };
+  });
+}
+
+/** Each product user at the school, with when they last ran a class session (teachers) or launched a lesson. */
+async function productUsage(productSchoolId: string) {
+  const db = getProductDb();
+  const [usersSnap, launchesSnap, sessionsSnap] = await Promise.all([
+    db.collection("users").where("school_id", "==", productSchoolId).limit(2000).get(),
+    db.collection("lesson_launches").where("school_id", "==", productSchoolId).limit(5000).get(),
+    db.collection("class_sessions").where("school_id", "==", productSchoolId).limit(5000).get(),
+  ]);
+  const last = new Map<string, number>();
+  const bump = (uid: unknown, t: number | null) => {
+    const id = safeText(uid);
+    if (id && t !== null && t > (last.get(id) || 0)) last.set(id, t);
+  };
+  for (const d of launchesSnap.docs) {
+    const x = d.data();
+    bump(x.student_id, millis(x.launched_at) ?? millis(x.updatedAt));
+  }
+  for (const d of sessionsSnap.docs) {
+    const x = d.data();
+    bump(x.teacher_uid, millis(x.created_at) ?? millis(x.updated_at));
+  }
+  return usersSnap.docs.map((d) => {
+    const x = d.data();
+    const role = safeText(x.userType || x.role).toLowerCase();
+    return { uid: d.id, role, lastActiveAt: last.get(d.id) ?? null };
+  });
+}
+
+type CustomerLink = { productSchoolId: string; productSchoolName?: string; renewalAt?: string | null; linkedBy?: string; linkedAt?: string };
+
+async function customerBlock(orgKey: string, rows: Record<string, unknown>[]) {
+  const isCustomer = rows.some((r) => safeText(r.Stage) === "Won");
+  const linkSnap = await getDataProjectDb().collection(CUSTOMER_LINKS).doc(linkDocId(orgKey)).get();
+  const link = linkSnap.exists ? (linkSnap.data() as CustomerLink) : null;
+  if (!isCustomer && !link) return null;
+  const renewalAt = millis(link?.renewalAt) ?? defaultRenewalAt(rows);
+  try {
+    if (!link?.productSchoolId) {
+      return { link: null, suggestions: suggestProductSchools(rows, await loadProductSchools()), health: null, renewalAt, productAccess: true };
+    }
+    const health = customerHealth({ users: await productUsage(link.productSchoolId), renewalAt });
+    return { link, suggestions: [], health, renewalAt, productAccess: true };
+  } catch (err) {
+    logger.warn("product data unavailable", String(err));
+    return { link, suggestions: [], health: null, renewalAt, productAccess: false };
+  }
+}
+
+app.post("/api/schools/:orgKey/link", requireRoles(STAFF_EDIT_ROLES), async (req, res) => {
+  const orgKey = safeText(req.params.orgKey).slice(0, 200);
+  const body = (req.body || {}) as Record<string, unknown>;
+  const productSchoolId = safeText(body.productSchoolId);
+  const renewalAt = safeText(body.renewalAt);
+  if (renewalAt && !isIsoDate(renewalAt)) return res.status(400).json({ message: "Renewal date is not valid." });
+  const ref = getDataProjectDb().collection(CUSTOMER_LINKS).doc(linkDocId(orgKey));
+  const auth = getAuthedUser(req);
+  if (!productSchoolId && !renewalAt && body.unlink === true) {
+    await ref.delete();
+    await writeOpsAudit({ action: "customer.unlink", auth, targetId: orgKey });
+    return res.json({ ok: true });
+  }
+  const update: Record<string, unknown> = { orgKey, linkedBy: auth?.email || null, linkedAt: new Date().toISOString() };
+  if (productSchoolId) {
+    let name = "";
+    try {
+      const doc = await getProductDb().collection("schools").doc(productSchoolId).get();
+      if (!doc.exists) return res.status(404).json({ message: "No such school in the LearnXR product." });
+      name = safeText(doc.data()?.name);
+    } catch {
+      return res.status(503).json({ message: "The dashboard can't read LearnXR product data yet." });
+    }
+    update.productSchoolId = productSchoolId;
+    update.productSchoolName = name;
+  }
+  if (renewalAt) update.renewalAt = renewalAt;
+  await ref.set(update, { merge: true });
+  await writeOpsAudit({ action: "customer.link", auth, targetId: orgKey, details: { productSchoolId, renewalAt } });
+  return res.json({ ok: true });
+});
+
+/** Won schools with their product link, usage health and renewal date. */
+app.get("/api/customers", requireRoles(SHEETS_ROLES), async (_req, res) => {
+  try {
+    const { rows } = await fetchSheetLeadRows({ limit: "5000" });
+    const byOrg = new Map<string, Record<string, unknown>[]>();
+    for (const r of rows as Record<string, unknown>[]) {
+      const key = safeText(r.Org_key) || safeText(r.Lead_id);
+      if (!key) continue;
+      if (!byOrg.has(key)) byOrg.set(key, []);
+      byOrg.get(key)!.push(r);
+    }
+    const won = [...byOrg.entries()].filter(([, rs]) => rs.some((r) => safeText(r.Stage) === "Won"));
+    const customers = await Promise.all(
+      won.map(async ([orgKey, rs]) => {
+        const block = await customerBlock(orgKey, rs);
+        const wonRow = rs.find((r) => safeText(r.Stage) === "Won")!;
+        return {
+          orgKey,
+          name: safeText(wonRow["School Name"]),
+          city: safeText(wonRow.City),
+          wonAt: safeText(wonRow.Won_at),
+          value: Number(safeText(wonRow.Paid_amount)) || Number(safeText(wonRow.Deal_value)) || 0,
+          owner: safeText(wonRow.Owner),
+          ...block,
+        };
+      })
+    );
+    return res.json({ customers });
+  } catch (err) {
+    logger.error("customers failed", err);
+    return res.status(502).json({ message: "Could not load customers." });
+  }
+});
+
+/** Daily: renewal reminders 60, 30 and 7 days before, once each. */
+app.post("/api/internal/renewal-check", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const { rows } = await fetchSheetLeadRows({ limit: "5000", fresh: "1" });
+  const byOrg = new Map<string, Record<string, unknown>[]>();
+  for (const r of rows as Record<string, unknown>[]) {
+    if (safeText(r.Stage) !== "Won") continue;
+    const key = safeText(r.Org_key) || safeText(r.Lead_id);
+    if (!byOrg.has(key)) byOrg.set(key, []);
+    byOrg.get(key)!.push(r);
+  }
+  const state = getDataProjectDb().collection(ALERT_STATE_COLLECTION);
+  const due: Array<{ ref: FirebaseFirestore.DocumentReference; line: string }> = [];
+  for (const [orgKey, rs] of byOrg) {
+    const link = (await getDataProjectDb().collection(CUSTOMER_LINKS).doc(linkDocId(orgKey)).get()).data() as CustomerLink | undefined;
+    const renewalAt = millis(link?.renewalAt) ?? defaultRenewalAt(rs);
+    if (!renewalAt) continue;
+    const reminder = renewalReminderDue(renewalAt);
+    if (!reminder) continue;
+    const ref = state.doc(`renewal-${linkDocId(orgKey)}-${new Date(renewalAt).toISOString().slice(0, 10)}-${reminder}`);
+    if ((await ref.get()).exists) continue;
+    due.push({ ref, line: `- ${safeText(rs[0]["School Name"])}: renews ${new Date(renewalAt).toISOString().slice(0, 10)} (${reminder}-day reminder)\n  https://agents.altiereality.com/schools/${encodeURIComponent(orgKey)}` });
+  }
+  if (due.length && (await postAlert(`${due.length} customer renewal(s) coming up`, ["Time to check in with these schools before they renew:", "", ...due.map((d) => d.line)].join("\n")))) {
+    await Promise.all(due.map((d) => d.ref.set({ lastSentAt: new Date().toISOString() })));
+  }
+  return res.json({ customers: byOrg.size, reminded: due.length });
+});
+
+// ---- Website forms → sales pipeline (contact form, report downloads), with a spam filter ----
+
+const FORM_SYNC = "formSync";
+
+async function syncForm(
+  key: string,
+  read: (after: unknown) => Promise<Array<{ id: string; createdAt: unknown; fields: Record<string, string> }>>,
+  source: string
+) {
+  const stateRef = getDataProjectDb().collection(FORM_SYNC).doc(key);
+  const cursor = (await stateRef.get()).data()?.cursor ?? null;
+  const items = await read(cursor);
+  let forwarded = 0;
+  let spam = 0;
+  let newest: unknown = cursor;
+  for (const item of items) {
+    const f = item.fields;
+    const reason = formSpamReason({ name: f.name, email: f.email, subject: f.subject, message: f.message });
+    if (reason) {
+      spam += 1;
+      await writeOpsAudit({ action: "form.spam", targetId: `${key}/${item.id}`, details: { reason, domain: (f.email || "").split("@")[1] || "" } });
+    } else {
+      const res = await fetch(`${N8N_WEBHOOK_BASE}/learnxr-website-lead`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: f.name,
+          organization: f.organization || "",
+          email: f.email,
+          phone: f.phone || "",
+          role: f.role || "",
+          source,
+          interest: f.subject || "",
+          message: [f.subject, f.message].filter(Boolean).join(" — ").slice(0, 900),
+          pageUrl: f.pageUrl || "",
+          submittedAt: new Date(millis(item.createdAt) ?? Date.now()).toISOString(),
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`website-lead webhook returned ${res.status}`);
+      forwarded += 1;
+    }
+    newest = item.createdAt;
+    await stateRef.set({ cursor: newest, updatedAt: new Date().toISOString() }, { merge: true });
+  }
+  return { checked: items.length, forwarded, spam };
+}
+
+/** n8n calls this every 15 minutes. */
+app.post("/api/internal/forms-sync", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const out: Record<string, unknown> = {};
+  const text = (v: unknown) => safeText(v);
+  try {
+    out.contactForm = await syncForm(
+      "contactSubmissions",
+      async (after) => {
+        let q = getDataProjectDb().collection("contactSubmissions").orderBy("createdAt").limit(50);
+        if (after) q = q.where("createdAt", ">", after);
+        const snap = await q.get();
+        return snap.docs.map((d) => {
+          const x = d.data();
+          return { id: d.id, createdAt: x.createdAt, fields: { name: text(x.name), email: text(x.email), subject: text(x.subject), message: text(x.message) } };
+        });
+      },
+      "contact_form"
+    );
+  } catch (err) {
+    out.contactForm = { error: String(err) };
+  }
+  try {
+    out.reportDownloads = await syncForm(
+      "report_leads",
+      async (after) => {
+        let q = getProductDb().collection("report_leads").orderBy("createdAt").limit(50);
+        if (after) q = q.where("createdAt", ">", after);
+        const snap = await q.get();
+        return snap.docs.map((d) => {
+          const x = d.data();
+          return {
+            id: d.id,
+            createdAt: x.createdAt,
+            fields: {
+              name: text(x.name),
+              email: text(x.email),
+              organization: text(x.organization),
+              role: text(x.role),
+              subject: `Downloaded report: ${text(x.reportTitle)}`,
+              message: [text(x.country), text(x.role)].filter(Boolean).join(", "),
+              pageUrl: text(x.pageUrl),
+            },
+          };
+        });
+      },
+      "report_download"
+    );
+  } catch (err) {
+    out.reportDownloads = { error: String(err).slice(0, 200) };
+  }
+  return res.json(out);
 });
 
 // ---- Team: leaderboard, speed-to-lead SLA alerts, weekly digest ----
@@ -2714,8 +2994,11 @@ app.get("/api/admin/health", requireRoles(ADMIN_ROLES), async (_req, res) => {
   const t = getTwilioConfig();
   if (t.ok) templates = await listApprovedTemplates(t).then((list) => list.length).catch(() => null);
 
+  const productAccess = await getProductDb().collection("schools").limit(1).get().then(() => true).catch(() => false);
+
   return res.json({
     checkedAt: new Date().toISOString(),
+    productAccess,
     workflows,
     email: { sentToday: emailsToday, cap: settings.dailyEmailCap },
     whatsapp: { failed24h: whatsappFailed24h, approvedTemplates: templates },

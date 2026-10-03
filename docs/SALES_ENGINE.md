@@ -132,3 +132,22 @@ Every one falls back to the old built-in values if the call fails.
 
 A form lead with an email or phone we already have updates that school's row (Engaged, hot, next step) instead of
 adding a new row. The same Meta lead seen twice is skipped.
+
+## Team and after-sale (2026-10-03)
+
+- **Team `/team`:** per-rep leaderboard (won, ₹, demos, calls, touches, open deals, speed to lead) and the hot leads still
+  waiting for a first call. The lead drawer has **Log call** with an outcome, and reply templates from Admin → Settings
+  appear there and as quick replies in Messaging.
+- **Customers `/customers` and the School page:** won schools, linked once to their school in the LearnXR product
+  (suggested by website, phone or name). Health comes from active teachers and students in the last 30 days against how
+  many are enrolled, plus days to renewal (default: a year after Won).
+  - **Needs** read access to the product project:
+    `gcloud projects add-iam-policy-binding learnxr-evoneuralai --member=serviceAccount:1074016177582-compute@developer.gserviceaccount.com --role=roles/datastore.viewer`
+- **Sales • Alerts schedules** (all call keyed function endpoints):
+
+  | Schedule | Endpoint | Does |
+  |---|---|---|
+  | every 30 min, Mon–Sat 10–19 | `/api/internal/sla-check` | Hot leads not called or messaged: the owner after 1 business hour, the manager after 4; once per level. |
+  | Monday 9:00 | `/api/internal/digest` | Weekly digest email. |
+  | daily 9:30 | `/api/internal/renewal-check` | Renewal reminders 60, 30 and 7 days before. |
+  | every 15 min | `/api/internal/forms-sync` | New website contact-form messages (lexrn1 `contactSubmissions`) and report-download sign-ups (product `report_leads`) go through a spam filter into Sales • Inbound as website leads; spam is logged as `form.spam`. |
