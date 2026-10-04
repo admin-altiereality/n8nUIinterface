@@ -101,7 +101,8 @@ export const Sidebar: React.FC = () => {
 
   const isActive = (path: string) => {
     if (path === '/') return location.pathname === '/';
-    return location.pathname.startsWith(path);
+    // Match whole path segments, so /sales doesn't light up on /sales-funnel.
+    return location.pathname === path || location.pathname.startsWith(`${path}/`);
   };
 
   return (

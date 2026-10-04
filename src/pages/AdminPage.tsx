@@ -120,7 +120,7 @@ export default function AdminPage() {
   const capUse = health?.email.sentToday != null ? `${health.email.sentToday} / ${health.email.cap}` : '—';
 
   return (
-    <div>
+    <div className="page-container animate-fade-in">
       <PageHeader title="Admin" subtitle="System health and settings for the sales engine">
         <Button variant="outline" size="sm" onClick={() => void loadHealth()} disabled={loadingHealth}>
           <RefreshCw className={`h-3.5 w-3.5 ${loadingHealth ? 'animate-spin' : ''}`} />

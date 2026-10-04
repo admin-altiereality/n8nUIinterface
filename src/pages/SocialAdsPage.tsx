@@ -294,7 +294,7 @@ export default function SocialAdsPage() {
   };
 
   return (
-    <div>
+    <div className="page-container animate-fade-in">
       <PageHeader title="Social Ads" subtitle="Instagram and Facebook campaigns for the Altie Reality Page">
         <div className="flex items-center gap-2">
           <select
