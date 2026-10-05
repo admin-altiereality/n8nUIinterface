@@ -18,6 +18,7 @@ import {
   Settings,
   Users,
   HeartHandshake,
+  BookOpen,
 } from 'lucide-react';
 
 interface NavItem {
@@ -87,6 +88,12 @@ const NAV_ITEMS: NavItem[] = [
     path: '/',
     icon: <LayoutDashboard className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'builder'],
+  },
+  {
+    label: 'Guide',
+    path: '/guide',
+    icon: <BookOpen className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson', 'whatsapp_manager', 'builder'],
   },
 ];
 
