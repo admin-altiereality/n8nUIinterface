@@ -359,6 +359,21 @@ export default function SalesFunnelPage() {
     };
   }, [firebaseEnabled, refreshRecentN8n]);
 
+  // A run this browser stopped watching (tab closed mid-run) has no numbers yet: fetch them from n8n once.
+  const countsRequestedFor = useRef<string | null>(null);
+  const latestExecId = latestRun?.n8nExecutionId;
+  const latestMissingCounts = Boolean(latestRun && !latestRun.counts && latestSummary?.found === undefined);
+  useEffect(() => {
+    if (!latestRun || !latestExecId || !latestMissingCounts || pollingExecutionId) return;
+    if (countsRequestedFor.current === latestExecId) return;
+    countsRequestedFor.current = latestExecId;
+    // n8n only returns custom data with the full run, which the backend trims to counts.
+    void getSalesExecutionStatus(latestExecId, { nodes: true }).then((exec) => {
+      const counts = countsFrom(exec);
+      if (counts) patchExecution(latestRun.id, { counts });
+    });
+  }, [latestRun, latestExecId, latestMissingCounts, pollingExecutionId, patchExecution]);
+
   useEffect(() => {
     if (!pollingExecutionId || !canPollExecution) return;
 
