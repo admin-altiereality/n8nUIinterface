@@ -168,6 +168,14 @@ export function LeadDrawer({ lead, onClose, onChange }: Props) {
     }
   };
 
+  // Website and Meta form leads keep their answers in Achievments as "question: answer | …".
+  const formAnswers = field(lead, 'Lead_form')
+    ? field(lead, 'Achievments')
+        .split(' | ')
+        .map((part) => part.trim())
+        .filter((part) => part && !/^(utm_|submitted_at|page:)/.test(part))
+    : [];
+
   const copyTemplate = async (body: string) => {
     const name = field(lead, 'Principal Name');
     const text = body.replace(/\{\{\s*name\s*\}\}/gi, name || 'there').replace(/\{\{\s*school\s*\}\}/gi, field(lead, 'School Name'));
@@ -470,6 +478,17 @@ export function LeadDrawer({ lead, onClose, onChange }: Props) {
               <p className="text-[11px] text-zinc-600">No activity yet.</p>
             )}
           </div>
+
+          {formAnswers.length > 0 && (
+            <div>
+              <h3 className="mb-2 text-xs font-semibold text-zinc-200">Form answers</h3>
+              <ul className="space-y-1 text-[11px] text-zinc-200">
+                {formAnswers.map((answer) => (
+                  <li key={answer}>{answer}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <div>
             <h3 className="mb-2 text-xs font-semibold text-zinc-200">Contact</h3>
