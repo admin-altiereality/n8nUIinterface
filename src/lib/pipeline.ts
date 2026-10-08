@@ -301,6 +301,15 @@ export function leadSource(row: SchoolLeadRow): LeadSource {
   return 'cold_email';
 }
 
+/** A reseller lead from the channel-partner ad or form, not a school. */
+export function isChannelPartner(row: SchoolLeadRow): boolean {
+  return (
+    /partner/i.test(field(row, 'Lead_form')) ||
+    /channel partner/i.test(field(row, 'Next_step')) ||
+    /channel partner enquiry/i.test(field(row, 'Achievments'))
+  );
+}
+
 export type ChannelRoi = {
   source: LeadSource;
   leads: number;

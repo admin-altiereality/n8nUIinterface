@@ -132,6 +132,7 @@ export const GUIDE_HTML = `
       <ul>
         <li>Each column shows how many deals it holds and their total ₹ value.</li>
         <li>A flame marks a hot lead. A red date means the next step is overdue.</li>
+        <li><strong>Channel partners</strong> (resellers) have violet cards with a <span class="ui">Channel partner</span> tag. Pick <span class="ui">Channel partners</span> in the source filter to see only them.</li>
         <li>Search by school, city or owner; filter by source; switch between <span class="ui">All</span> and <span class="ui">Mine</span>.</li>
         <li>Won and Lost are collapsed; press <span class="ui">Show</span> to expand them.</li>
         <li>Click a card to open its lead drawer and change its stage there.</li>
@@ -173,10 +174,11 @@ export const GUIDE_HTML = `
       <h3>How to send one</h3>
       <ol>
         <li>Open the lead and press <span class="ui">WhatsApp</span>, or open the chat in <a href="#messaging">Messaging</a>.</li>
-        <li>Pick the template from <span class="ui">Choose a template…</span>. Use the <strong>हिंदी</strong> version if the contact writes or speaks in Hindi, otherwise <strong>EN</strong>.</li>
+        <li>Pick the template from <span class="ui">Choose a template…</span>, or press the green <span class="ui">Suggested next</span> button above it. Use the <strong>हिंदी</strong> version if the contact writes or speaks in Hindi, otherwise <strong>EN</strong>. Within 24 hours of their last message, press <span class="ui">Send a template</span> first.</li>
         <li>Check the boxes. <code>{{1}}</code> (their first name) and <code>{{2}}</code> (your first name) are filled for you. Type <code>{{3}}</code> yourself where the template needs it (see the tables).</li>
         <li>Read the preview, then send.</li>
       </ol>
+      <p>The list only shows templates for this contact: a channel partner's chat shows partner templates, a school's chat shows school templates. <span class="ui">Suggested next</span> is the step after the last one they got (for a school after its demo, the next onboarding step; before that, the reply that fits what they said). Templates they already got sit at the bottom under <span class="ui">Already sent</span>.</p>
       <p>Every template has a <span class="ui">Call us</span> button that rings +91 86199 53434. Templates show in the list only after WhatsApp approves them, so a few onboarding steps may appear later.</p>
 
       <h3>Channel partners (resellers)</h3>

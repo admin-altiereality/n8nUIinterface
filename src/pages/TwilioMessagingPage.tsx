@@ -23,7 +23,17 @@ import type { SchoolLeadRow } from '../api/sheetsClient';
 import { useSheetLeads } from '../lib/useSheetLeads';
 import { useAppSettings } from '../lib/useAppSettings';
 import { useLeadUpdate } from '../lib/useLeadUpdate';
-import { BOOKING_URL, WHATSAPP_WINDOW_MS, bookingLink, field, ownerLabel, stageOf, whatsappWindowLeftMs } from '../lib/pipeline';
+import {
+  BOOKING_URL,
+  WHATSAPP_WINDOW_MS,
+  bookingLink,
+  field,
+  isChannelPartner,
+  ownerLabel,
+  stageOf,
+  whatsappWindowLeftMs,
+} from '../lib/pipeline';
+import { arrangeTemplates, sentTemplates, suggestedKeys, templatesFor, type Audience } from '../lib/waTemplates';
 import {
   fetchTwilioHealth,
   fetchTwilioStatuses,
@@ -143,6 +153,16 @@ function groupTemplates(templates: TwilioTemplate[]): Array<[string, TwilioTempl
   const other = templates.filter((t) => !groups.some(([, re]) => re.test(t.name)));
   if (other.length) result.push(['Other', other]);
   return result;
+}
+
+function templateOption(t: TwilioTemplate, suffix = '') {
+  return (
+    <option key={t.sid} value={t.sid}>
+      {templateLabel(t)}
+      {t.category ? ` · ${t.category.toLowerCase()}` : ''}
+      {suffix}
+    </option>
+  );
 }
 
 function isInbound(direction: string | undefined): boolean {
@@ -323,6 +343,8 @@ export default function TwilioMessagingPage() {
   const [seen, setSeen] = useState<SeenAt>(readSeen);
   const [templateSid, setTemplateSid] = useState('');
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
+  // Within the 24-hour window the composer is free text; this switches it to the template picker.
+  const [forceTemplate, setForceTemplate] = useState(false);
 
   const { user } = useAuth();
   const me = (user?.email || '').toLowerCase();
@@ -549,10 +571,28 @@ export default function TwilioMessagingPage() {
   // WhatsApp allows free-form messages only within 24 hours of the contact's last message. The sheet's
   // reply time covers chats whose messages aren't in the loaded history.
   const lastInbound = activeThread && !isNewChatMode ? threadLastInbound(activeThread) : null;
-  const templateMode = !(
+  const templateOnly = !(
     (lastInbound && Date.now() - messageTime(lastInbound) < WHATSAPP_WINDOW_MS) ||
     (activeLead && whatsappWindowLeftMs(activeLead) !== null)
   );
+  const templateMode = templateOnly || forceTemplate;
+
+  // A partner's chat offers partner templates, a school's chat school ones; the next step is suggested and
+  // templates this contact already got (read from our sent messages) go last.
+  const audience: Audience = activeLead ? (isChannelPartner(activeLead) ? 'partner' : 'school') : 'all';
+  const templateOptions = useMemo(() => {
+    const offered = templatesFor(templates, audience);
+    const sentBodies = (activeThread && !isNewChatMode ? activeThread.messages : [])
+      .filter((m) => !isInbound(m.direction) && !['failed', 'undelivered'].includes(String(m.status || '').toLowerCase()))
+      .sort((a, b) => messageTime(a) - messageTime(b))
+      .map((m) => m.body || '');
+    const sent = sentTemplates(offered, sentBodies);
+    const suggested = suggestedKeys(offered, audience, sent.keys, {
+      stage: activeLead ? stageOf(activeLead) : 'New',
+      replyIntent: activeLead ? field(activeLead, 'Reply_intent') : '',
+    });
+    return { offered, ...arrangeTemplates(offered, suggested, sent.keys, sent.lastLang) };
+  }, [templates, audience, activeThread, isNewChatMode, activeLead]);
   const selectedTemplate = templates.find((t) => t.sid === templateSid) || null;
   const missingTemplateVars = (selectedTemplate?.variableKeys || []).filter((key) => !templateVars[key]?.trim());
   const cannedReplies = [
@@ -592,6 +632,12 @@ export default function TwilioMessagingPage() {
 
   // Opening a chat marks it read in this browser.
   const activeThreadKey = isNewChatMode ? undefined : activeThread?.id;
+  // Another chat may be offered other templates.
+  useEffect(() => {
+    setForceTemplate(false);
+    setTemplateSid('');
+    setTemplateVars({});
+  }, [activeThreadKey]);
   const activeThreadLastAt = activeThread?.lastAt;
   useEffect(() => {
     if (!activeThreadKey) return;
@@ -658,6 +704,7 @@ export default function TwilioMessagingPage() {
       if (templateMode) {
         setTemplateSid('');
         setTemplateVars({});
+        setForceTemplate(false);
       }
       setComposerText('');
       if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
@@ -1043,23 +1090,52 @@ export default function TwilioMessagingPage() {
               <div className="flex-1 relative">
                 {templateMode ? (
                   <div className="space-y-2">
-                    <p className="text-[10px] text-amber-300">
-                      {lastInbound || (activeLead && field(activeLead, 'Replied_at'))
-                        ? 'Their last message was more than 24 hours ago, so WhatsApp only allows an approved template.'
-                        : 'WhatsApp only allows an approved template to start a chat.'}
-                    </p>
+                    {templateOnly ? (
+                      <p className="text-[10px] text-amber-300">
+                        {lastInbound || (activeLead && field(activeLead, 'Replied_at'))
+                          ? 'Their last message was more than 24 hours ago, so WhatsApp only allows an approved template.'
+                          : 'WhatsApp only allows an approved template to start a chat.'}
+                      </p>
+                    ) : (
+                      <p className="flex items-center justify-between text-[10px] text-zinc-400">
+                        Send an approved template, with its buttons.
+                        <button type="button" onClick={() => setForceTemplate(false)} className="text-sky-400 hover:underline">
+                          Type a message instead
+                        </button>
+                      </p>
+                    )}
+                    {templateOptions.suggested.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] text-zinc-500">Suggested next:</span>
+                        {templateOptions.suggested.map((t) => (
+                          <button
+                            key={t.sid}
+                            type="button"
+                            onClick={() => selectTemplate(t.sid)}
+                            className={`rounded-md border px-2 py-0.5 text-[10px] ${
+                              templateSid === t.sid
+                                ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-200'
+                                : 'border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10'
+                            }`}
+                          >
+                            {templateLabel(t)}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     <Select value={templateSid} onChange={(e) => selectTemplate(e.target.value)} disabled={twilioSuspended} className="h-9 text-xs">
-                      <option value="">{templates.length ? 'Choose a template…' : 'No approved templates loaded'}</option>
-                      {groupTemplates(templates).map(([group, items]) => (
+                      <option value="">{templateOptions.offered.length ? 'Choose a template…' : 'No approved templates loaded'}</option>
+                      {templateOptions.suggested.length > 0 && (
+                        <optgroup label="Suggested next">{templateOptions.suggested.map((t) => templateOption(t))}</optgroup>
+                      )}
+                      {groupTemplates(templateOptions.rest).map(([group, items]) => (
                         <optgroup key={group} label={group}>
-                          {items.map((t) => (
-                            <option key={t.sid} value={t.sid}>
-                              {templateLabel(t)}
-                              {t.category ? ` · ${t.category.toLowerCase()}` : ''}
-                            </option>
-                          ))}
+                          {items.map((t) => templateOption(t))}
                         </optgroup>
                       ))}
+                      {templateOptions.sent.length > 0 && (
+                        <optgroup label="Already sent">{templateOptions.sent.map((t) => templateOption(t, ' · sent'))}</optgroup>
+                      )}
                     </Select>
                     {selectedTemplate && (
                       <>
@@ -1082,6 +1158,13 @@ export default function TwilioMessagingPage() {
                 <>
                 {!twilioSuspended && (
                   <div className="mb-2 flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setForceTemplate(true)}
+                      className="rounded-md border border-emerald-500/40 px-2 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10"
+                    >
+                      Send a template
+                    </button>
                     {cannedReplies.map((reply) => (
                       <button
                         key={reply.label}

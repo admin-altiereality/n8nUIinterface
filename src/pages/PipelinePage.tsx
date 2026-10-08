@@ -14,6 +14,7 @@ import {
   field,
   formatInr,
   formatWhen,
+  isChannelPartner,
   leadSource,
   ownerLabel,
   pipelineByStage,
@@ -33,7 +34,10 @@ export default function PipelinePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [scope, setScope] = useState<'all' | 'mine'>('all');
   const [query, setQuery] = useState('');
-  const [source, setSource] = useState<LeadSource | 'all'>((searchParams.get('source') as LeadSource) || 'all');
+  // 'partner' is not a source: it shows channel-partner (reseller) leads from any source.
+  const [source, setSource] = useState<LeadSource | 'all' | 'partner'>(
+    (searchParams.get('source') as LeadSource | 'partner') || 'all'
+  );
   const [showAll, setShowAll] = useState<Partial<Record<Stage, boolean>>>({});
   const { leads, loading, error, reload, replaceLead } = useSheetLeads({ refreshMs: 60_000 });
 
@@ -43,7 +47,7 @@ export default function PipelinePage() {
     const visible = leads.filter(
       (row) =>
         (scope === 'all' || field(row, 'Owner').toLowerCase() === me) &&
-        (source === 'all' || leadSource(row) === source) &&
+        (source === 'all' || (source === 'partner' ? isChannelPartner(row) : leadSource(row) === source)) &&
         (!q || SEARCH_COLUMNS.some((key) => field(row, key).toLowerCase().includes(q)))
     );
     return pipelineByStage(visible);
@@ -84,7 +88,7 @@ export default function PipelinePage() {
           />
           <select
             value={source}
-            onChange={(e) => setSource(e.target.value as LeadSource | 'all')}
+            onChange={(e) => setSource(e.target.value as LeadSource | 'all' | 'partner')}
             className="h-8 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-100"
             aria-label="Lead source"
           >
@@ -92,6 +96,7 @@ export default function PipelinePage() {
             {SOURCES.map((key) => (
               <option key={key} value={key}>{SOURCE_LABELS[key]}</option>
             ))}
+            <option value="partner">Channel partners</option>
           </select>
           <div className="flex rounded-lg border border-zinc-700 p-0.5">
             {(['all', 'mine'] as const).map((s) => (
@@ -138,22 +143,28 @@ export default function PipelinePage() {
                 {cards.map((row) => {
                   const due = timeOf(row, 'Next_step_due');
                   const owner = field(row, 'Owner').toLowerCase();
+                  const partner = isChannelPartner(row);
                   return (
                     <button
                       key={field(row, 'Lead_id') || field(row, 'School Name')}
                       type="button"
                       onClick={() => openDrawer(row)}
-                      className="w-full rounded-lg border border-zinc-800 bg-zinc-800/40 p-3 text-left hover:border-zinc-700"
+                      className={`w-full rounded-lg border p-3 text-left ${
+                        partner
+                          ? 'border-violet-500/30 border-l-2 border-l-violet-500 bg-violet-500/10 hover:border-violet-500/50'
+                          : 'border-zinc-800 bg-zinc-800/40 hover:border-zinc-700'
+                      }`}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <p className="line-clamp-2 text-xs font-medium text-zinc-100">{field(row, 'School Name') || 'Unknown school'}</p>
                         {timeOf(row, 'Hot_at') !== null && <Flame className="h-3.5 w-3.5 flex-shrink-0 text-orange-400" />}
                       </div>
                       <p className="mt-0.5 truncate text-[10px] text-zinc-500">
+                        {partner && <span className="mr-1 rounded bg-violet-500/20 px-1 py-px font-medium text-violet-200">Channel partner</span>}
                         {field(row, 'City') || '—'}
                         {owner && ` · ${owner === me ? 'you' : ownerLabel(owner)}`}
                         {dealValue(row) > 0 && ` · ${formatInr(dealValue(row))}`}
-                        {leadSource(row) !== 'cold_email' && ` · ${SOURCE_LABELS[leadSource(row)]}`}
+                        {!partner && leadSource(row) !== 'cold_email' && ` · ${SOURCE_LABELS[leadSource(row)]}`}
                       </p>
                       {field(row, 'Next_step') && (
                         <p className="mt-1.5 truncate text-[10px] text-zinc-300">

@@ -13,6 +13,7 @@ import {
   whatsappWindowLeftMs,
   channelRoi,
   leadSource,
+  isChannelPartner,
 } from './pipeline';
 
 // 2 Oct 2026, 15:00 IST
@@ -158,6 +159,15 @@ describe('leadSource', () => {
     expect(leadSource({ XR_status: 'Inbound Website Lead' } as SchoolLeadRow)).toBe('website');
     expect(leadSource({ Status: 'sent' } as SchoolLeadRow)).toBe('cold_email');
     expect(leadSource({ Lead_source: 'tv' } as SchoolLeadRow)).toBe('cold_email');
+  });
+});
+
+describe('isChannelPartner', () => {
+  it('spots partner leads by form, next step or answers', () => {
+    expect(isChannelPartner({ Lead_form: 'LearnXR Channel Partner form' } as SchoolLeadRow)).toBe(true);
+    expect(isChannelPartner({ Next_step: 'Call channel partner lead' } as SchoolLeadRow)).toBe(true);
+    expect(isChannelPartner({ Achievments: 'channel partner enquiry | city: Raipur' } as SchoolLeadRow)).toBe(true);
+    expect(isChannelPartner({ Lead_form: 'School lead v2', Next_step: 'Call Facebook ad lead' } as SchoolLeadRow)).toBe(false);
   });
 });
 
