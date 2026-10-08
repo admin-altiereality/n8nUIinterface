@@ -151,3 +151,21 @@ adding a new row. The same Meta lead seen twice is skipped.
   | Monday 9:00 | `/api/internal/digest` | Weekly digest email. |
   | daily 9:30 | `/api/internal/renewal-check` | Renewal reminders 60, 30 and 7 days before. |
   | every 15 min | `/api/internal/forms-sync` | New website contact-form messages (lexrn1 `contactSubmissions`) and report-download sign-ups (product `report_leads`) go through a spam filter into Sales • Inbound as website leads; spam is logged as `form.spam`. |
+
+## WhatsApp templates (Twilio)
+
+Outside WhatsApp's 24-hour window a rep can only send an approved template. Our own templates are named
+`lxr_partner_*` and `lxr_school_*` with an `_en` / `_hi` suffix, use a `twilio/call-to-action` layout with a
+**Call us** button (+91 86199 53434), and share one variable convention so Messaging can fill them:
+`{{1}}` = recipient's first name, `{{2}}` = sender's name, `{{3}}` = a per-send link, date or partner ID.
+
+| Group | Templates | Category |
+|---|---|---|
+| Partner first contact | `lxr_partner_form` (partner sign-up page), `lxr_partner_book_call` (Calendly) | Marketing |
+| Partner onboarding | `lxr_partner_step1_welcome` … `step6_live` | Utility |
+| School onboarding | `lxr_school_step1_demo_recap` … `step5_go_live` | Utility |
+| School replies | `lxr_school_reply_positive / demo / pricing / neutral / negative` | Marketing |
+
+Templates are created through the Twilio Content API and submitted to WhatsApp for approval; an approved
+template can't be edited, so a change means a new template. The dashboard lists approved ones from
+`GET /api/twilio/templates`.

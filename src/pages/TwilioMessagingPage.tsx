@@ -119,6 +119,32 @@ function fillTemplate(body: string, values: Record<string, string>): string {
   return body.replace(/\{\{(\d+)\}\}/g, (match, key: string) => values[key] || match);
 }
 
+/** Our lxr_* templates share one variable convention (see selectTemplate) and an _en / _hi suffix. */
+const LXR_TEMPLATE = /^lxr_/;
+
+function templateLabel(t: TwilioTemplate): string {
+  const lang = t.name.endsWith('_hi') ? 'हिंदी' : t.name.endsWith('_en') ? 'EN' : '';
+  const base = LXR_TEMPLATE.test(t.name) ? t.name.replace(/^lxr_(partner|school)_/, '').replace(/_(en|hi)$/, '').replace(/_/g, ' ') : t.name;
+  return lang ? `${base} · ${lang}` : base;
+}
+
+/** Channel partner, then school, then everything else; onboarding steps in order, English before Hindi. */
+function groupTemplates(templates: TwilioTemplate[]): Array<[string, TwilioTemplate[]]> {
+  const groups: Array<[string, RegExp]> = [
+    ['Channel partner', /^lxr_partner_/],
+    ['School', /^lxr_school_/],
+  ];
+  const rank = (name: string) => (/_step\d/.test(name) ? 1 : 0) + (name.endsWith('_hi') ? 0.5 : 0);
+  const ordered = (items: TwilioTemplate[]) =>
+    [...items].sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name));
+  const result: Array<[string, TwilioTemplate[]]> = groups
+    .map(([label, re]): [string, TwilioTemplate[]] => [label, ordered(templates.filter((t) => re.test(t.name)))])
+    .filter(([, items]) => items.length > 0);
+  const other = templates.filter((t) => !groups.some(([, re]) => re.test(t.name)));
+  if (other.length) result.push(['Other', other]);
+  return result;
+}
+
 function isInbound(direction: string | undefined): boolean {
   return String(direction || '').toLowerCase() === 'inbound';
 }
@@ -548,7 +574,20 @@ export default function TwilioMessagingPage() {
 
   const selectTemplate = (sid: string) => {
     setTemplateSid(sid);
-    setTemplateVars({ ...(templates.find((t) => t.sid === sid)?.variables || {}) });
+    const template = templates.find((t) => t.sid === sid);
+    if (template && LXR_TEMPLATE.test(template.name)) {
+      // {{1}} = recipient's first name, {{2}} = sender's name; {{3}} (a link or date) is typed per send.
+      const firstName = (s: string) => s.trim().split(/\s+/)[0] || '';
+      const vars: Record<string, string> = {};
+      for (const key of template.variableKeys || []) {
+        if (key === '1') vars[key] = activeLead ? firstName(field(activeLead, 'Principal Name')) : '';
+        else if (key === '2') vars[key] = firstName(user?.name || '');
+        else vars[key] = '';
+      }
+      setTemplateVars(vars);
+      return;
+    }
+    setTemplateVars({ ...(template?.variables || {}) });
   };
 
   // Opening a chat marks it read in this browser.
@@ -1011,11 +1050,15 @@ export default function TwilioMessagingPage() {
                     </p>
                     <Select value={templateSid} onChange={(e) => selectTemplate(e.target.value)} disabled={twilioSuspended} className="h-9 text-xs">
                       <option value="">{templates.length ? 'Choose a template…' : 'No approved templates loaded'}</option>
-                      {templates.map((t) => (
-                        <option key={t.sid} value={t.sid}>
-                          {t.name}
-                          {t.category ? ` · ${t.category.toLowerCase()}` : ''}
-                        </option>
+                      {groupTemplates(templates).map(([group, items]) => (
+                        <optgroup key={group} label={group}>
+                          {items.map((t) => (
+                            <option key={t.sid} value={t.sid}>
+                              {templateLabel(t)}
+                              {t.category ? ` · ${t.category.toLowerCase()}` : ''}
+                            </option>
+                          ))}
+                        </optgroup>
                       ))}
                     </Select>
                     {selectedTemplate && (
