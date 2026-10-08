@@ -96,11 +96,18 @@ export type TwilioHealth = {
   source?: string;
 };
 
+/** An approved WhatsApp template from Twilio's Content API. */
 export type TwilioTemplate = {
   sid: string;
   name: string;
   channel: string;
-  mediaType?: string;
+  language?: string;
+  category?: string;
+  contentType?: string;
+  /** Message text with {{1}}, {{2}}… placeholders. */
+  body?: string;
+  variableKeys?: string[];
+  /** Twilio's sample value for each variable, used to pre-fill the form. */
   variables?: Record<string, string>;
   isDefault?: boolean;
 };

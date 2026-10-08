@@ -26,7 +26,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 async function buildAppUser(fbUser: FirebaseUser): Promise<User> {
-  const role = await fetchUserRole(fbUser.uid);
+  const role = await fetchUserRole(fbUser);
   const name = await fetchUserDisplayName(fbUser.uid, fbUser.displayName || fbUser.email?.split('@')[0]);
 
   return {

@@ -47,6 +47,55 @@ export type SchoolLeadRow = Record<string, unknown> & {
   Last_Follow_up?: string;
   Next_Follow_up?: string;
   XR_status?: string;
+  place_id?: string;
+  Email_template_id?: string;
+  Email_stage?: string;
+  Email_sent_at?: string;
+  Delivered_status?: string;
+  Opened_status?: string;
+  Bounced_status?: string;
+  Click_count?: string;
+  Last_Clicked_Button?: string;
+  Last_Clicked_Template?: string;
+  Last_Clicked_Stage?: string;
+  Last_Clicked_at?: string;
+  Clicked_HowLearnXR?: string;
+  Clicked_Website?: string;
+  Clicked_WhatsApp?: string;
+  Clicked_Demo?: string;
+  Clicked_Pricing?: string;
+  Suspected_bot_clicks?: string;
+  Reply_intent?: string;
+  Reply_confidence?: string;
+  Replied_at?: string;
+  Reply_snippet?: string;
+  Whatsapp_reminder_count?: string;
+  Whatsapp_reminder_at?: string;
+  // Pipeline columns (v3)
+  Lead_id?: string;
+  Org_key?: string;
+  Stage?: string;
+  Owner?: string;
+  Next_step?: string;
+  Next_step_due?: string;
+  Do_not_contact?: string;
+  Hot_at?: string;
+  First_touch_at?: string;
+  WhatsApp_number?: string;
+  Reply_channel?: string;
+  Demo_booked_at?: string;
+  Demo_at?: string;
+  Demo_done_at?: string;
+  Deal_value?: string;
+  Students?: string;
+  Package?: string;
+  Lost_at?: string;
+  Lost_reason?: string;
+  Won_at?: string;
+  Proposal_sent_at?: string;
+  Paid_amount?: string;
+  Paid_at?: string;
+  Clicked_buttons?: string;
 };
 
 export type FetchLeadsResult = {
@@ -100,5 +149,9 @@ export function leadPhoneForMessaging(row: SchoolLeadRow): string | null {
   if (!raw) return null;
   const digits = raw.replace(/[^\d+]/g, '');
   if (!digits) return null;
-  return digits.startsWith('+') ? digits : digits.length === 10 ? `+91${digits}` : `+${digits}`;
+  if (digits.startsWith('+')) return digits;
+  if (digits.length === 10) return `+91${digits}`;
+  // Google Places often stores Indian numbers in national format (0 + 10 digits).
+  if (digits.length === 11 && digits.startsWith('0')) return `+91${digits.slice(1)}`;
+  return `+${digits}`;
 }

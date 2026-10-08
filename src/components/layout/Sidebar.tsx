@@ -6,12 +6,19 @@ import { Tooltip } from '../ui/tooltip';
 import {
   LayoutDashboard,
   Gauge,
+  Home,
+  Columns3,
   Target,
   MessageCircle,
   LogOut,
   ChevronLeft,
   ChevronRight,
   Zap,
+  Megaphone,
+  Settings,
+  Users,
+  HeartHandshake,
+  BookOpen,
 } from 'lucide-react';
 
 interface NavItem {
@@ -29,22 +36,64 @@ const NAV_ITEMS: NavItem[] = [
     roles: ['superadmin', 'associate', 'salesperson', 'whatsapp_manager'],
   },
   {
+    label: 'Sales Home',
+    path: '/sales',
+    icon: <Home className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Pipeline',
+    path: '/pipeline',
+    icon: <Columns3 className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Customers',
+    path: '/customers',
+    icon: <HeartHandshake className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Team',
+    path: '/team',
+    icon: <Users className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Campaigns',
+    path: '/sales-funnel',
+    icon: <Target className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Social Ads',
+    path: '/social',
+    icon: <Megaphone className="w-5 h-5" />,
+    roles: ['superadmin', 'associate'],
+  },
+  {
+    label: 'Messaging',
+    path: '/twilio-messaging',
+    icon: <MessageCircle className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson', 'whatsapp_manager'],
+  },
+  {
+    label: 'Admin',
+    path: '/admin',
+    icon: <Settings className="w-5 h-5" />,
+    roles: ['superadmin'],
+  },
+  {
     label: 'Builder',
     path: '/',
     icon: <LayoutDashboard className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'builder'],
   },
   {
-    label: 'Sales Funnel',
-    path: '/sales-funnel',
-    icon: <Target className="w-5 h-5" />,
-    roles: ['superadmin', 'associate', 'salesperson'],
-  },
-  {
-    label: 'Messaging',
-    path: '/twilio-messaging',
-    icon: <MessageCircle className="w-5 h-5" />,
-    roles: ['superadmin', 'associate', 'whatsapp_manager'],
+    label: 'Guide',
+    path: '/guide',
+    icon: <BookOpen className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson', 'whatsapp_manager', 'builder'],
   },
 ];
 
@@ -59,7 +108,8 @@ export const Sidebar: React.FC = () => {
 
   const isActive = (path: string) => {
     if (path === '/') return location.pathname === '/';
-    return location.pathname.startsWith(path);
+    // Match whole path segments, so /sales doesn't light up on /sales-funnel.
+    return location.pathname === path || location.pathname.startsWith(`${path}/`);
   };
 
   return (

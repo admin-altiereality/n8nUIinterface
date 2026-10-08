@@ -10,6 +10,33 @@ import cors from "cors";
 import express from "express";
 import { defineSecret } from "firebase-functions/params";
 import { createHmac, timingSafeEqual } from "crypto";
+import {
+  META_AD_ACCOUNT_ID,
+  META_RANGES,
+  MetaApiError,
+  type MetaCreds,
+  boostInstagramPost,
+  fetchLead,
+  getOverview,
+  leadToSalesEvent,
+  listCampaigns,
+  listInstagramMedia,
+  parseBoostRequest,
+  parseEntityChange,
+  updateEntity,
+  verifyMetaSignature,
+} from "./meta";
+import { auditEvents, messageEvents, rowEvents, schoolSummary, sortTimeline, toE164, type TwilioMessage } from "./schools";
+import {
+  customerHealth,
+  defaultRenewalAt,
+  formSpamReason,
+  renewalReminderDue,
+  suggestProductSchools,
+  type ProductSchool,
+} from "./customers";
+import { CALL_OUTCOMES, leaderboard, slaAlert, slaBreaches, weeklyDigest } from "./team";
+import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefaults, type AppSettings } from "./settings";
 
 setGlobalOptions({ maxInstances: 10 });
 
@@ -26,11 +53,20 @@ type AuthedUser = {
 
 const n8nApiUrlSecret = defineSecret("N8N_API_URL_SECRET");
 const n8nApiKeySecret = defineSecret("N8N_API_KEY_SECRET");
+/** Shared with n8n's "Altie Function Key" Header Auth credential; sent as X-Altie-Key. */
+const n8nWebhookSecret = defineSecret("N8N_WEBHOOK_SECRET");
 
 const twilioAccountSidSecret = defineSecret("TWILIO_ACCOUNT_SID");
 const twilioAuthTokenSecret = defineSecret("TWILIO_AUTH_TOKEN");
 const twilioMessagingServiceSidSecret = defineSecret("TWILIO_MESSAGING_SERVICE_SID_SECRET");
 const twilioWhatsappFromSecret = defineSecret("TWILIO_WHATSAPP_FROM_SECRET");
+
+/** Meta system-user token (ads_management, ads_read, leads_retrieval, pages and Instagram read). */
+const metaSystemTokenSecret = defineSecret("META_SYSTEM_TOKEN");
+/** The Meta app's secret: signs webhook payloads and the appsecret_proof on API calls. */
+const metaAppSecret = defineSecret("META_APP_SECRET");
+/** The token typed into the Meta app's webhook setup; Meta echoes it on the verify call. */
+const metaVerifyTokenSecret = defineSecret("META_VERIFY_TOKEN");
 
 const AUTH_FIREBASE_PROJECT_ID =
   process.env.AUTH_FIREBASE_PROJECT_ID || "learnxr-evoneuralai";
@@ -44,18 +80,52 @@ const AGENT_ROLES = new Set([
   "whatsapp_manager",
 ]);
 
-const TWILIO_ROLES = new Set(["superadmin", "associate", "whatsapp_manager"]);
+const TWILIO_ROLES = new Set(["superadmin", "associate", "salesperson", "whatsapp_manager"]);
 const N8N_ROLES = new Set(["superadmin", "associate", "builder"]);
 /** Sales Funnel execution polling + Sheets leads (scoped away from full builder n8n access). */
 const SALES_N8N_ROLES = new Set(["superadmin", "associate", "salesperson"]);
 const SHEETS_ROLES = new Set(["superadmin", "associate", "salesperson"]);
 const OPS_ROLES = new Set(["superadmin", "associate", "salesperson", "whatsapp_manager"]);
+/** Social Ads: associates can watch; only superadmins can spend (pause/resume, budgets, boosts). */
+const META_ROLES = new Set(["superadmin", "associate"]);
+const META_WRITE_ROLES = new Set(["superadmin"]);
+/** Settings and system health. */
+const ADMIN_ROLES = new Set(["superadmin"]);
 
 const SALES_FUNNEL_WORKFLOW_ID =
-  process.env.N8N_SALES_WORKFLOW_ID || "sLk0CAalsSlR5z4P";
-const SHEETS_LEADS_WEBHOOK_URL =
-  process.env.N8N_SHEETS_LEADS_WEBHOOK_URL ||
-  "https://n8n.altiereality.com/webhook/sheet-leads-read";
+  process.env.N8N_SALES_WORKFLOW_ID || "6pBPEDzIfj8939GG";
+/** The funnel before "Sales • Scrape & Qualify v3"; its past runs stay viewable. */
+const LEGACY_SALES_WORKFLOW_ID = "sLk0CAalsSlR5z4P";
+const N8N_WEBHOOK_BASE = (process.env.N8N_WEBHOOK_BASE || "https://n8n.altiereality.com/webhook").replace(/\/$/, "");
+const SHEET_CACHE_MS = 60_000;
+
+const LEAD_ID_PATTERN = /^lx[0-9a-z]+(-\d+)?$/;
+const LEAD_STAGES = new Set(["New", "Contacted", "Engaged", "Demo booked", "Demo done", "Proposal", "Won", "Lost"]);
+const LOST_REASONS = new Set([
+  "Not interested",
+  "No budget",
+  "Chose another vendor",
+  "No response",
+  "Wrong contact",
+  "Unsubscribed",
+  "Duplicate",
+  "Other",
+]);
+/** Stage → milestone column stamped when a lead enters that stage (n8n keeps the first value). */
+const STAGE_MILESTONE: Record<string, string> = {
+  "Demo booked": "Demo_booked_at",
+  "Demo done": "Demo_done_at",
+  Proposal: "Proposal_sent_at",
+  Won: "Won_at",
+  Lost: "Lost_at",
+};
+const CITY_RUN_PRESETS: Record<string, string> = {
+  cbse: "CBSE schools in",
+  icse: "ICSE schools in",
+  ib: "IB schools in",
+  international: "International schools in",
+  all: "Schools in",
+};
 
 const TWILIO_STATUS_COLLECTION = "twilioMessageStatus";
 const TWILIO_OUTBOUND_LOGS_COLLECTION = "twilioOutboundLogs";
@@ -63,9 +133,11 @@ const TWILIO_INBOUND_COLLECTION = "twilioInboundMessages";
 const LEAD_ASSIGNMENTS_COLLECTION = "leadAssignments";
 const OPS_AUDIT_COLLECTION = "opsAuditLog";
 const DEFAULT_WHATSAPP_QUICK_REPLY_TEMPLATE_SID = "HX9fab5aaad062c64423df7a312c84e6af";
-const DEFAULT_QUICK_REPLY_TEMPLATE_NAME = "LearnXR quick reply";
 const MEDIA_SIZE_LIMIT_BYTES = 16 * 1024 * 1024;
-const SUPPORTED_MEDIA_CONTENT_TYPE = /^(image\/|video\/|audio\/|application\/pdf$)/i;
+// SVG is excluded: it can carry script and would run on this origin.
+const SUPPORTED_MEDIA_CONTENT_TYPE = /^(image\/(?!svg)|video\/|audio\/|application\/pdf$)/i;
+const DATA_PROJECT_ID = process.env.GCLOUD_PROJECT || "lexrn1";
+const MEDIA_BUCKETS = new Set([`${DATA_PROJECT_ID}.appspot.com`, `${DATA_PROJECT_ID}.firebasestorage.app`]);
 const TWILIO_STATUS_RANK: Record<string, number> = {
   queued: 0,
   accepted: 1,
@@ -129,11 +201,6 @@ function getAuthProjectVerifier() {
   return getAdminAuth(getAuthProjectApp());
 }
 
-function getAuthProjectDb() {
-  const { getFirestore } = adminFirestoreModule();
-  return getFirestore(getAuthProjectApp());
-}
-
 function getDataProjectAuth() {
   ensureAdminDefaultApp();
   const { getAuth: getAdminAuth } = adminAuthModule();
@@ -151,6 +218,33 @@ function getN8nConfig(): N8nProxyConfig {
     apiUrl: n8nApiUrlSecret.value(),
     apiKey: n8nApiKeySecret.value(),
   };
+}
+
+/** Calls an n8n webhook with the X-Altie-Key header that n8n's Header Auth checks. */
+async function callN8nWebhook(
+  path: string,
+  init: { method?: "GET" | "POST"; query?: Record<string, string>; body?: unknown; timeoutMs?: number } = {}
+): Promise<{ status: number; data: unknown }> {
+  const url = new URL(`${N8N_WEBHOOK_BASE}/${path}`);
+  for (const [key, value] of Object.entries(init.query || {})) url.searchParams.set(key, value);
+  const upstream = await fetch(url.toString(), {
+    method: init.method || "GET",
+    headers: {
+      Accept: "application/json",
+      "X-Altie-Key": n8nWebhookSecret.value(),
+      ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: AbortSignal.timeout(init.timeoutMs || 30_000),
+  });
+  const text = await upstream.text();
+  let data: unknown = text;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    // keep the raw text
+  }
+  return { status: upstream.status, data };
 }
 
 function twilioBasicAuthHeader(accountSid: string, authToken: string): string {
@@ -181,58 +275,14 @@ function getTwilioConfig():
   };
 }
 
-async function resolveRole(
-  uid: string,
-  decoded: Record<string, unknown>,
-  idToken?: string
-): Promise<string | null> {
-  const claimRole = decoded.role || decoded.userRole;
-  if (typeof claimRole === "string" && claimRole.trim()) return claimRole.trim();
-
-  // Prefer local (lexrn1) mirror written during data-token exchange
-  try {
-    const local = await getDataProjectDb().collection("users").doc(uid).get();
-    if (local.exists) {
-      const d = local.data() || {};
-      const r = d.role || d.userRole;
-      if (typeof r === "string" && r.trim()) return r.trim();
-    }
-  } catch (err) {
-    logger.warn("lexrn1 role lookup failed", err);
-  }
-
-  // Auth project via Admin SDK (needs SA access on learnxr-evoneuralai)
-  try {
-    const remote = await getAuthProjectDb().collection("users").doc(uid).get();
-    if (remote.exists) {
-      const d = remote.data() || {};
-      const r = d.role || d.userRole;
-      if (typeof r === "string" && r.trim()) return r.trim();
-    }
-  } catch (err) {
-    logger.warn("auth-project admin role lookup failed", err);
-  }
-
-  // Fallback: read users/{uid} as the end-user (their token already allows own-doc read)
-  if (idToken) {
-    try {
-      const url =
-        `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(AUTH_FIREBASE_PROJECT_ID)}` +
-        `/databases/(default)/documents/users/${encodeURIComponent(uid)}`;
-      const resp = await fetch(url, { headers: { Authorization: `Bearer ${idToken}` } });
-      if (resp.ok) {
-        const doc = (await resp.json()) as {
-          fields?: { role?: { stringValue?: string }; userRole?: { stringValue?: string } };
-        };
-        const r = doc.fields?.role?.stringValue || doc.fields?.userRole?.stringValue;
-        if (typeof r === "string" && r.trim()) return r.trim();
-      }
-    } catch (err) {
-      logger.warn("auth-project user-token role lookup failed", err);
-    }
-  }
-
-  return null;
+/**
+ * Agent access comes only from the `agentRole` custom claim, which only the Admin SDK can set
+ * (functions/create-users.mjs). Firestore `users.role` is product data that signed-up users can
+ * write themselves, so it must never grant access here.
+ */
+function resolveRole(decoded: Record<string, unknown>): string | null {
+  const role = decoded.agentRole;
+  return typeof role === "string" && role.trim() ? role.trim() : null;
 }
 
 async function authenticateRequest(req: express.Request): Promise<AuthedUser | { error: string; status: number }> {
@@ -248,7 +298,7 @@ async function authenticateRequest(req: express.Request): Promise<AuthedUser | {
     if (!decoded.uid) {
       return { error: "Invalid ID token.", status: 401 };
     }
-    const role = await resolveRole(decoded.uid, decoded as unknown as Record<string, unknown>, idToken);
+    const role = resolveRole(decoded as unknown as Record<string, unknown>);
     if (!role || !AGENT_ROLES.has(role)) {
       return { error: "Forbidden: agent role required.", status: 403 };
     }
@@ -277,16 +327,19 @@ function requireRoles(allowed: Set<string>) {
   };
 }
 
+/** Only files in this project's own Storage bucket; any other bucket could be attacker-controlled. */
 function isAllowedMediaUrl(mediaUrl: string): boolean {
   try {
     const u = new URL(mediaUrl);
     if (u.protocol !== "https:") return false;
     const host = u.hostname.toLowerCase();
-    return (
-      host === "firebasestorage.googleapis.com" ||
-      host.endsWith(".firebasestorage.app") ||
-      host === "storage.googleapis.com"
-    );
+    let bucket = "";
+    if (host === "firebasestorage.googleapis.com") {
+      bucket = /^\/v0\/b\/([^/]+)\//.exec(u.pathname)?.[1] || "";
+    } else if (host === "storage.googleapis.com") {
+      bucket = u.pathname.split("/")[1] || "";
+    }
+    return MEDIA_BUCKETS.has(decodeURIComponent(bucket).toLowerCase());
   } catch {
     return false;
   }
@@ -380,9 +433,14 @@ function normalizeWhatsAppAddress(value: unknown): string {
 }
 
 function leadKeyFromPhone(value: unknown): string {
-  const normalized = normalizeWhatsAppAddress(value).replace(/[^\d+]/g, "");
-  if (!normalized) return "unknown";
-  return normalized.startsWith("+") ? normalized : `+${normalized}`;
+  const raw = normalizeWhatsAppAddress(value);
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return "unknown";
+  if (raw.startsWith("+")) return `+${digits}`;
+  // Sheet numbers are usually bare Indian mobiles, while Twilio always uses +91.
+  if (/^[6-9]\d{9}$/.test(digits)) return `+91${digits}`;
+  if (/^0[6-9]\d{9}$/.test(digits)) return `+91${digits.slice(1)}`;
+  return `+${digits}`;
 }
 
 function roleCanUseSheets(role: string): boolean {
@@ -421,17 +479,19 @@ async function sendOpsAlert(input: {
   message: string;
   details?: Record<string, unknown>;
 }): Promise<void> {
-  const webhookUrl = process.env.OPS_ALERT_EMAIL_WEBHOOK_URL || "";
-  if (!webhookUrl) return;
+  const webhookUrl = process.env.OPS_ALERT_EMAIL_WEBHOOK_URL || `${N8N_WEBHOOK_BASE}/sales-alert`;
   try {
     await fetch(webhookUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Altie-Key": n8nWebhookSecret.value() },
       body: JSON.stringify({
         ...input,
+        title: `${input.severity}: ${input.type}`,
+        detail: `${input.message}\n${JSON.stringify(input.details || {}, null, 2)}`,
         source: "learnxr-agents-api",
         createdAt: new Date().toISOString(),
       }),
+      signal: AbortSignal.timeout(10_000),
     });
     await writeOpsAudit({ action: "alert.sent", details: { type: input.type, severity: input.severity } });
   } catch (err) {
@@ -539,10 +599,14 @@ function validateTwilioRequestSignature(
 
 function twilioSignatureUrlCandidates(req: express.Request, path: string): string[] {
   const base = getPublicApiBase(req).replace(/\/$/, "");
-  const originalPath = (req.originalUrl || req.url || path).split("?")[0] || path;
+  const fullOriginal = req.originalUrl || req.url || path;
+  const originalPath = fullOriginal.split("?")[0] || path;
   const host = (req.get("host") || "").split(",")[0]!.trim();
   const forwardedProto = (req.get("x-forwarded-proto") || "https").split(",")[0]!.trim();
   const candidates = new Set<string>([
+    // Twilio signs the full URL including any query string.
+    `${base}${fullOriginal}`,
+    `https://agents.altiereality.com${fullOriginal}`,
     `${base}${path}`,
     `${base}${originalPath}`,
     `https://agents-altiereality-com.web.app${path}`,
@@ -573,6 +637,64 @@ function validateTwilioRequestForAnyUrl(
   params: Record<string, string>
 ): boolean {
   return urls.some((url) => validateTwilioRequestSignature(authToken, signature, url, params));
+}
+
+/**
+ * Twilio signs webhooks with the account's primary auth token, so a stored secondary token never
+ * matches. In that case ask Twilio's API for the message by SID and keep only what Twilio returns:
+ * a forged request can't produce a real message SID from this account.
+ */
+async function verifyTwilioWebhook(
+  req: express.Request,
+  t: { accountSid: string; authToken: string },
+  path: string,
+  params: Record<string, string>
+): Promise<Record<string, string> | null> {
+  const signature = req.get("x-twilio-signature") || undefined;
+  if (validateTwilioRequestForAnyUrl(t.authToken, signature, twilioSignatureUrlCandidates(req, path), params)) {
+    return params;
+  }
+  const sid = params.MessageSid || params.SmsSid || "";
+  if (!isValidTwilioMessageSid(sid)) return null;
+  try {
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(t.accountSid)}/Messages/${encodeURIComponent(sid)}.json`;
+    const apiRes = await fetch(url, { headers: { Authorization: twilioBasicAuthHeader(t.accountSid, t.authToken) } });
+    if (!apiRes.ok) return null;
+    const msg = (await apiRes.json()) as Record<string, unknown>;
+    logger.info("Twilio webhook verified by API lookup (signature mismatch)", { path });
+    return {
+      ...params,
+      MessageSid: sid,
+      From: String(msg.from ?? ""),
+      To: String(msg.to ?? ""),
+      Body: String(msg.body ?? ""),
+      MessageStatus: String(msg.status ?? ""),
+      ErrorCode: msg.error_code == null ? "" : String(msg.error_code),
+      ErrorMessage: msg.error_message == null ? "" : String(msg.error_message),
+      NumMedia: String(msg.num_media ?? "0"),
+    };
+  } catch (err) {
+    logger.warn("Twilio webhook API verification failed", err);
+    return null;
+  }
+}
+
+const WHATSAPP_STOP = /^\s*(stop|stopall|unsubscribe|opt[\s-]?out|cancel|end|quit|band\s*karo)\s*[.!]*\s*$/i;
+const WHATSAPP_START = /^\s*(start|unstop|subscribe)\s*[.!]*\s*$/i;
+const WHATSAPP_OPT_OUTS_COLLECTION = "whatsappOptOuts";
+
+/** Hands a sales event to n8n ("Sales • Events"); never blocks the caller for more than 3 seconds. */
+async function forwardSalesEvent(event: Record<string, unknown>): Promise<void> {
+  try {
+    const { status } = await callN8nWebhook("sales-events", {
+      method: "POST",
+      body: { ...event, at: new Date().toISOString() },
+      timeoutMs: 3_000,
+    });
+    if (status >= 400) logger.warn("sales event rejected by n8n", { type: event.type, status });
+  } catch (err) {
+    logger.warn("sales event forward failed", { type: event.type, error: String(err) });
+  }
 }
 
 function shouldAdvanceTwilioStatus(prev: string | undefined, next: string): boolean {
@@ -718,48 +840,152 @@ function filterLeadRows(rows: unknown[], query: Record<string, unknown>): Record
   });
 }
 
+// Per-instance cache of the whole sheet; pages and the dashboard re-read it constantly.
+let sheetCache: { at: number; rows: unknown[] } | null = null;
+
 async function fetchSheetLeadRows(query: Record<string, unknown> = {}): Promise<{
   fetchedAt: string;
   rows: Record<string, unknown>[];
 }> {
-  const webhookUrl = SHEETS_LEADS_WEBHOOK_URL;
-  if (!webhookUrl) {
-    throw new Error("Sheets leads webhook is not configured.");
+  const fresh = query.fresh === "1" || query.fresh === true;
+  if (!sheetCache || fresh || Date.now() - sheetCache.at > SHEET_CACHE_MS) {
+    const { status, data } = await callN8nWebhook("sheet-leads-read");
+    if (typeof data === "string") {
+      throw new Error(`Unexpected sheets webhook response: ${data.slice(0, 120)}`);
+    }
+    if (status >= 400) {
+      const message =
+        data && typeof data === "object" && typeof (data as Record<string, unknown>).message === "string"
+          ? String((data as Record<string, unknown>).message)
+          : "Sheets leads fetch failed";
+      throw new Error(message);
+    }
+    let rows: unknown[] = [];
+    if (Array.isArray(data)) rows = data;
+    else if (data && typeof data === "object") {
+      const obj = data as Record<string, unknown>;
+      if (Array.isArray(obj.rows)) rows = obj.rows;
+      else if (Array.isArray(obj.data)) rows = obj.data;
+      else if (Array.isArray(obj.leads)) rows = obj.leads;
+    }
+    sheetCache = { at: Date.now(), rows };
   }
-  const url = new URL(webhookUrl);
-  for (const key of ["city", "status", "leadStatus", "whatsappStatus", "q", "limit"] as const) {
-    const val = query[key];
-    if (typeof val === "string" && val.trim()) url.searchParams.set(key, val.trim());
+  return { fetchedAt: new Date(sheetCache.at).toISOString(), rows: filterLeadRows(sheetCache.rows, query) };
+}
+
+type LeadPatchResult =
+  | { fields: Record<string, string>; ifOwnerIn?: string[] }
+  | { error: string; field?: string };
+
+const STAFF_EDIT_ROLES = new Set(["superadmin", "associate"]);
+
+function isIsoDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(value));
+}
+
+/** Validates the whitelisted fields a rep may change and adds the server-owned ones. */
+function buildLeadPatch(body: Record<string, unknown>, auth: AuthedUser): LeadPatchResult {
+  const input = (body.fields && typeof body.fields === "object" ? body.fields : {}) as Record<string, unknown>;
+  const now = new Date().toISOString();
+  const fields: Record<string, string> = {};
+  let ifOwnerIn: string[] | undefined;
+  const me = (auth.email || "").toLowerCase();
+  const canEditOthers = STAFF_EDIT_ROLES.has(auth.role) && body.force === true;
+
+  for (const [key, raw] of Object.entries(input)) {
+    const value = safeText(raw);
+    switch (key) {
+      case "Stage": {
+        if (!LEAD_STAGES.has(value)) return { error: "invalid_stage", field: key };
+        fields.Stage = value;
+        if (STAGE_MILESTONE[value]) fields[STAGE_MILESTONE[value]] = now;
+        break;
+      }
+      case "Lost_reason":
+        if (value && !LOST_REASONS.has(value)) return { error: "invalid_lost_reason", field: key };
+        fields.Lost_reason = value;
+        break;
+      case "Owner": {
+        const owner = value.toLowerCase() === "me" ? me : value.toLowerCase();
+        if (owner && owner !== me && !STAFF_EDIT_ROLES.has(auth.role)) return { error: "forbidden_owner", field: key };
+        if (owner && !/^[^@\s]+@[^@\s]+$/.test(owner)) return { error: "invalid_owner", field: key };
+        fields.Owner = owner;
+        // Claiming only works on unowned leads; unclaiming only your own (staff can force).
+        if (!canEditOthers) ifOwnerIn = owner ? ["", me] : [me];
+        break;
+      }
+      case "Next_step":
+        if (value.length > 140) return { error: "too_long", field: key };
+        fields.Next_step = value;
+        break;
+      case "Next_step_due":
+      case "Demo_at":
+        if (value && !isIsoDate(value)) return { error: "invalid_date", field: key };
+        fields[key] = value;
+        break;
+      case "Deal_value":
+      case "Students": {
+        const n = Number(value);
+        const max = key === "Deal_value" ? 1e8 : 1e5;
+        if (value && (!Number.isInteger(n) || n < 0 || n > max)) return { error: "invalid_number", field: key };
+        fields[key] = value;
+        break;
+      }
+      case "Package":
+        if (value.length > 60) return { error: "too_long", field: key };
+        fields.Package = value;
+        break;
+      case "Do_not_contact":
+        if (value && value !== "manual") return { error: "invalid_value", field: key };
+        fields.Do_not_contact = value ? `manual:${now}` : "";
+        break;
+      case "WhatsApp_number": {
+        const phone = value ? leadKeyFromPhone(value) : "";
+        if (phone && !/^\+\d{8,15}$/.test(phone)) return { error: "invalid_phone", field: key };
+        fields.WhatsApp_number = phone;
+        break;
+      }
+      default:
+        return { error: "field_not_allowed", field: key };
+    }
   }
 
-  const upstream = await fetch(url.toString(), {
-    method: "GET",
-    headers: { Accept: "application/json" },
+  const event = safeText(body.event);
+  if (event && event !== "no_show") return { error: "invalid_event", field: "event" };
+  if (event === "no_show") {
+    // A missed demo goes back to Engaged so it is rebooked rather than left in "Demo booked".
+    fields.Stage = "Engaged";
+    fields.Next_step = "Rebook the demo (they missed it)";
+    fields.Next_step_due = now;
+  }
+
+  if (fields.Stage === "Lost" && !fields.Lost_reason) return { error: "lost_reason_required", field: "Lost_reason" };
+  if (["call", "whatsapp", "email"].includes(safeText(body.touch))) fields.First_touch_at = now;
+  return { fields, ifOwnerIn };
+}
+
+/** Sends a lead update through n8n ("Sales • Update Lead") and maps its outcome to HTTP. */
+async function updateLeadInSheet(
+  leadId: string,
+  fields: Record<string, string>,
+  actor: { email?: string; role?: string },
+  ifOwnerIn?: string[]
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const { status, data } = await callN8nWebhook("sheet-lead-update", {
+    method: "POST",
+    body: { leadId, fields, ifOwnerIn, actor },
+    timeoutMs: 20_000,
   });
-  const text = await upstream.text();
-  let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`Unexpected sheets webhook response: ${text.slice(0, 120)}`);
+  const result = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
+  if (status === 200) {
+    sheetCache = null;
+    return { status: 200, body: { ok: true, lead: result.lead || null } };
   }
-  if (!upstream.ok) {
-    const message =
-      data && typeof data === "object" && typeof (data as Record<string, unknown>).message === "string"
-        ? String((data as Record<string, unknown>).message)
-        : "Sheets leads fetch failed";
-    throw new Error(message);
-  }
-
-  let rows: unknown[] = [];
-  if (Array.isArray(data)) rows = data;
-  else if (data && typeof data === "object") {
-    const obj = data as Record<string, unknown>;
-    if (Array.isArray(obj.rows)) rows = obj.rows;
-    else if (Array.isArray(obj.data)) rows = obj.data;
-    else if (Array.isArray(obj.leads)) rows = obj.leads;
-  }
-  return { fetchedAt: new Date().toISOString(), rows: filterLeadRows(rows, query) };
+  // A bare 404 from n8n means the webhook isn't registered, not that the lead is missing.
+  if (status === 404 && result.error === "not_found") return { status: 404, body: { error: "not_found" } };
+  if (status === 409) return { status: 409, body: { error: "owner_conflict", owner: result.owner || "" } };
+  logger.warn("lead update via n8n failed", { status, leadId });
+  return { status: 502, body: { error: "upstream_error" } };
 }
 
 function leadCity(row: Record<string, unknown>): string {
@@ -1076,6 +1302,26 @@ app.get("/api/n8n/sales-executions", requireRoles(SALES_N8N_ROLES), async (req, 
   }
 });
 
+/** Keeps what the Campaigns page shows per node (timing, errors, item counts) and drops the item payloads. */
+function slimRunData(data: unknown): Record<string, unknown> {
+  const resultData = ((data as { resultData?: Record<string, unknown> } | undefined)?.resultData || {}) as Record<string, unknown>;
+  const runData = (resultData.runData || {}) as Record<string, Array<Record<string, unknown>>>;
+  const slim: Record<string, unknown[]> = {};
+  for (const [node, runs] of Object.entries(runData)) {
+    slim[node] = (Array.isArray(runs) ? runs : []).map((run) => {
+      const main = ((run.data as { main?: unknown[] } | undefined)?.main || []) as unknown[];
+      const error = run.error as { message?: string } | undefined;
+      return {
+        startTime: run.startTime,
+        executionTime: run.executionTime,
+        ...(error ? { error: { message: safeText(error.message) } } : {}),
+        data: { main: main.map((items) => new Array(Array.isArray(items) ? items.length : 0).fill(0)) },
+      };
+    });
+  }
+  return { resultData: { runData: slim } };
+}
+
 app.get("/api/n8n/sales-executions/:id", requireRoles(SALES_N8N_ROLES), async (req, res) => {
   const { apiUrl, apiKey } = getN8nConfig();
   if (!apiUrl || !apiKey) {
@@ -1083,8 +1329,11 @@ app.get("/api/n8n/sales-executions/:id", requireRoles(SALES_N8N_ROLES), async (r
   }
 
   const id = req.params.id;
+  // A funnel run's data runs to several MB (it holds every fetched web page), so it is only loaded
+  // when node counts are asked for, and only the counts leave this function.
+  const withNodes = req.query.nodes === "1";
   const base = apiUrl.replace(/\/$/, "");
-  const url = `${base}/api/v1/executions/${encodeURIComponent(id)}?includeData=true`;
+  const url = `${base}/api/v1/executions/${encodeURIComponent(id)}?includeData=${withNodes}`;
 
   try {
     const upstream = await fetch(url, { headers: { "X-N8N-API-KEY": apiKey } });
@@ -1112,10 +1361,14 @@ app.get("/api/n8n/sales-executions/:id", requireRoles(SALES_N8N_ROLES), async (r
     const wfId =
       (typeof data.workflowId === "string" && data.workflowId) ||
       (workflowData && typeof workflowData.id === "string" ? workflowData.id : null);
-    if (wfId && wfId !== SALES_FUNNEL_WORKFLOW_ID) {
+    if (wfId && wfId !== SALES_FUNNEL_WORKFLOW_ID && wfId !== LEGACY_SALES_WORKFLOW_ID) {
       return res.status(403).json({ message: "Forbidden: execution is not a sales funnel run." });
     }
-    return res.status(upstream.status).json(data);
+    const execution: Record<string, unknown> = { ...data };
+    delete execution.workflowData;
+    delete execution.data;
+    if (withNodes) execution.data = slimRunData(data.data);
+    return res.status(upstream.status).json(execution);
   } catch (err) {
     logger.error("n8n sales execution detail proxy failed", err);
     const fallback = await getStoredSalesExecution(id);
@@ -1425,20 +1678,56 @@ app.get("/api/twilio/health", requireRoles(TWILIO_ROLES), (_req, res) => {
   });
 });
 
-app.get("/api/twilio/templates", requireRoles(TWILIO_ROLES), (_req, res) => {
-  return res.json({
-    templates: [
-      {
-        sid: DEFAULT_WHATSAPP_QUICK_REPLY_TEMPLATE_SID,
-        name: DEFAULT_QUICK_REPLY_TEMPLATE_NAME,
-        channel: "whatsapp",
-        mediaType: "text",
-        contentType: "twilio/quick-reply",
-        variables: {},
-        isDefault: true,
-      },
-    ],
+type ContentApiItem = {
+  sid?: string;
+  friendly_name?: string;
+  language?: string;
+  variables?: Record<string, string>;
+  types?: Record<string, { body?: string }>;
+  approval_requests?: { status?: string; category?: string };
+};
+
+const TEMPLATE_CACHE_MS = 10 * 60_000;
+let templateCache: { at: number; templates: Array<Record<string, unknown>> } | null = null;
+
+/** Approved WhatsApp templates from Twilio's Content API, cached for 10 minutes. */
+async function listApprovedTemplates(t: { accountSid: string; authToken: string }): Promise<Array<Record<string, unknown>>> {
+  if (templateCache && Date.now() - templateCache.at < TEMPLATE_CACHE_MS) return templateCache.templates;
+  const apiRes = await fetch("https://content.twilio.com/v1/ContentAndApprovals?PageSize=500", {
+    headers: { Authorization: twilioBasicAuthHeader(t.accountSid, t.authToken) },
   });
+  if (!apiRes.ok) throw new Error(`Twilio Content API returned ${apiRes.status}`);
+  const data = (await apiRes.json()) as { contents?: ContentApiItem[] };
+  const templates = (data.contents || [])
+    .filter((c) => c.sid && c.approval_requests?.status === "approved")
+    .map((c) => {
+      const [contentType, type] = Object.entries(c.types || {})[0] || ["", {}];
+      return {
+        sid: c.sid,
+        name: c.friendly_name || c.sid,
+        channel: "whatsapp",
+        language: c.language || "",
+        category: c.approval_requests?.category || "",
+        contentType,
+        body: type.body || "",
+        variableKeys: Object.keys(c.variables || {}).sort((a, b) => Number(a) - Number(b)),
+        variables: c.variables || {},
+        isDefault: c.sid === DEFAULT_WHATSAPP_QUICK_REPLY_TEMPLATE_SID,
+      };
+    });
+  templateCache = { at: Date.now(), templates };
+  return templates;
+}
+
+app.get("/api/twilio/templates", requireRoles(TWILIO_ROLES), async (_req, res) => {
+  const t = getTwilioConfig();
+  if (!t.ok) return res.status(503).json({ message: "Twilio is not configured on this function." });
+  try {
+    return res.json({ templates: await listApprovedTemplates(t) });
+  } catch (err) {
+    logger.warn("Twilio template list failed", err);
+    return res.status(502).json({ message: "Could not load WhatsApp templates from Twilio." });
+  }
 });
 
 app.get("/api/twilio/send-diagnostics", requireRoles(TWILIO_ROLES), async (req, res) => {
@@ -1661,16 +1950,19 @@ app.post("/api/twilio/status", async (req, res) => {
   }
 
   const body = (req.body || {}) as Record<string, unknown>;
-  const params: Record<string, string> = {};
+  const rawParams: Record<string, string> = {};
   for (const [k, v] of Object.entries(body)) {
     if (v == null) continue;
-    params[k] = String(v);
+    rawParams[k] = String(v);
   }
 
-  const signature = req.get("x-twilio-signature") || undefined;
-  const callbackUrls = twilioSignatureUrlCandidates(req, "/api/twilio/status");
-  if (!validateTwilioRequestForAnyUrl(t.authToken, signature, callbackUrls, params)) {
-    logger.warn("Twilio status signature mismatch", { callbackUrl: callbackUrls[0] });
+  const params = await verifyTwilioWebhook(req, t, "/api/twilio/status", rawParams);
+  if (!params) {
+    logger.warn("Twilio status signature mismatch", {
+      host: req.get("host"),
+      forwardedHost: req.get("x-forwarded-host"),
+      originalUrl: req.originalUrl,
+    });
     return res.status(403).send("Invalid signature");
   }
 
@@ -1706,16 +1998,19 @@ app.post("/api/twilio/inbound", async (req, res) => {
   }
 
   const body = (req.body || {}) as Record<string, unknown>;
-  const params: Record<string, string> = {};
+  const rawParams: Record<string, string> = {};
   for (const [k, v] of Object.entries(body)) {
     if (v == null) continue;
-    params[k] = String(v);
+    rawParams[k] = String(v);
   }
 
-  const signature = req.get("x-twilio-signature") || undefined;
-  const callbackUrls = twilioSignatureUrlCandidates(req, "/api/twilio/inbound");
-  if (!validateTwilioRequestForAnyUrl(t.authToken, signature, callbackUrls, params)) {
-    logger.warn("Twilio inbound signature mismatch", { callbackUrl: callbackUrls[0] });
+  const params = await verifyTwilioWebhook(req, t, "/api/twilio/inbound", rawParams);
+  if (!params) {
+    logger.warn("Twilio inbound signature mismatch", {
+      host: req.get("host"),
+      forwardedHost: req.get("x-forwarded-host"),
+      originalUrl: req.originalUrl,
+    });
     return res.status(403).send("Invalid signature");
   }
 
@@ -1755,6 +2050,17 @@ app.post("/api/twilio/inbound", async (req, res) => {
       errorMessage: params.ErrorMessage || null,
     });
     await writeOpsAudit({ action: "twilio.inbound.persisted", targetId: threadId, details: { sid } });
+
+    const text = params.Body || "";
+    const optOuts = getDataProjectDb().collection(WHATSAPP_OPT_OUTS_COLLECTION);
+    if (WHATSAPP_STOP.test(text)) {
+      await optOuts.doc(threadId).set({ phone: threadId, keyword: text.trim(), at: new Date().toISOString() });
+      await forwardSalesEvent({ type: "whatsapp_optout", phone: threadId, keyword: text.trim(), sid });
+    } else {
+      if (WHATSAPP_START.test(text)) await optOuts.doc(threadId).delete();
+      await forwardSalesEvent({ type: "whatsapp_reply", phone: threadId, body: text, sid, profileName: params.ProfileName || "" });
+    }
+
     res.setHeader("Content-Type", "text/xml");
     return res.status(200).send("<Response></Response>");
   } catch (err) {
@@ -1776,11 +2082,16 @@ app.get("/api/twilio/media/:filename", async (req, res) => {
       return res.status(upstream.status).send("Media unavailable");
     }
     const contentType = upstream.headers.get("content-type") || "application/octet-stream";
+    if (!SUPPORTED_MEDIA_CONTENT_TYPE.test(contentType)) {
+      return res.status(415).send("Unsupported media type");
+    }
     const body = Buffer.from(await upstream.arrayBuffer());
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Length", String(body.length));
     res.setHeader("Content-Disposition", contentDispositionFilename(filename));
     res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
     return res.status(200).send(body);
   } catch (err) {
     logger.warn("Twilio media proxy failed", err);
@@ -1820,7 +2131,7 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
   const templateSid = requestedTemplateSid;
   let diagnosticId: string | null = null;
 
-  if (!to || (!hasBody && !hasMedia)) {
+  if (!to || (!hasBody && !hasMedia && !templateSid)) {
     diagnosticId = await writeTwilioDiagnostic({
       phase: "validation",
       status: "failed",
@@ -1831,7 +2142,7 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
       twilioMessage: "Missing required fields",
     });
     return res.status(400).json({
-      message: `Missing required fields (Twilio send): toPresent=${Boolean(to)} hasBody=${hasBody} hasMedia=${hasMedia}`,
+      message: `Missing required fields (Twilio send): toPresent=${Boolean(to)} hasBody=${hasBody} hasMedia=${hasMedia} hasTemplate=${Boolean(templateSid)}`,
       phase: "validation",
       diagnosticId,
     });
@@ -1851,6 +2162,10 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
       phase: "validation",
       diagnosticId,
     });
+  }
+  const optOut = await getDataProjectDb().collection(WHATSAPP_OPT_OUTS_COLLECTION).doc(leadKeyFromPhone(to)).get();
+  if (optOut.exists) {
+    return res.status(409).json({ message: "This number replied STOP, so WhatsApp messages to it are blocked.", phase: "validation" });
   }
   if (hasMedia && !isAllowedMediaUrl(mediaUrl)) {
     diagnosticId = await writeTwilioDiagnostic({
@@ -1907,11 +2222,8 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
 
   const statusCallback = `${getPublicApiBase(req)}/api/twilio/status`;
   const publicMediaUrl = hasMedia ? getPublicMediaUrl(req, mediaUrl, mediaFilename) : "";
+  // Each template declares its own variables; the sender fills them, so nothing is guessed here.
   const templateVariables = readTemplateVariables(req.body?.templateVariables);
-  if (hasMedia && !templateVariables["1"]) templateVariables["1"] = publicMediaUrl;
-  if (hasMedia && !templateVariables["2"]) templateVariables["2"] = mediaFilename;
-  if (hasMedia && !templateVariables["3"]) templateVariables["3"] = bodyText.trim() || `Please review ${mediaFilename}.`;
-  else if (hasBody && !templateVariables["3"]) templateVariables["3"] = bodyText.trim();
 
   diagnosticId = await writeTwilioDiagnostic({
     phase: "attempt",
@@ -2071,6 +2383,833 @@ app.post("/api/twilio/messages", requireRoles(TWILIO_ROLES), async (req, res) =>
   }
 });
 
+// ─── Sales: city runs, lead updates, activity, unsubscribe ───
+
+app.post("/api/sales/city-runs", requireRoles(SALES_N8N_ROLES), async (req, res) => {
+  const auth = getAuthedUser(req);
+  const city = safeText(req.body?.city);
+  const preset = safeText(req.body?.preset || "cbse").toLowerCase();
+  const queryPrefix = CITY_RUN_PRESETS[preset];
+  if (!/^\p{L}[\p{L} .'-]{1,59}$/u.test(city)) return res.status(400).json({ error: "invalid_city" });
+  if (!queryPrefix) return res.status(400).json({ error: "invalid_preset" });
+
+  try {
+    const { status, data } = await callN8nWebhook("city-scrape-start-v3", {
+      query: { city, preset, queryPrefix, query: `${queryPrefix} ${city}`, startedAt: new Date().toISOString() },
+      timeoutMs: 15_000,
+    });
+    const result = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
+    const ok = status < 400;
+    await writeOpsAudit({
+      action: ok ? "n8n.city_scrape.launch" : "n8n.city_scrape.launch_failed",
+      auth,
+      targetId: city,
+      details: { city, preset, responseStatus: status, n8nExecutionId: result.executionId || null },
+    });
+    if (!ok) return res.status(502).json({ error: "upstream_error" });
+    return res.status(202).json({ executionId: result.executionId || null, status: "started", city });
+  } catch (err) {
+    logger.error("city run launch failed", err);
+    return res.status(502).json({ error: "upstream_error" });
+  }
+});
+
+app.patch("/api/leads/:leadId", requireRoles(SHEETS_ROLES), async (req, res) => {
+  const auth = getAuthedUser(req)!;
+  const leadId = safeText(req.params.leadId);
+  if (!LEAD_ID_PATTERN.test(leadId)) return res.status(400).json({ error: "invalid_lead_id" });
+  const body = (req.body || {}) as Record<string, unknown>;
+  const note = safeText(body.note).slice(0, 2000);
+  const callInput = (body.call && typeof body.call === "object" ? body.call : null) as Record<string, unknown> | null;
+  const call = callInput ? { outcome: safeText(callInput.outcome), notes: safeText(callInput.notes).slice(0, 1000) } : null;
+  if (call && !(CALL_OUTCOMES as readonly string[]).includes(call.outcome)) return res.status(400).json({ error: "invalid_call_outcome" });
+  const patch = buildLeadPatch(body, auth);
+  if ("error" in patch) return res.status(400).json(patch);
+  const hasFields = Object.keys(patch.fields).length > 0;
+  if (!hasFields && !note && !call) return res.status(400).json({ error: "nothing_to_update" });
+
+  try {
+    let result: { status: number; body: Record<string, unknown> } = { status: 200, body: { ok: true, lead: null } };
+    if (hasFields) {
+      result = await updateLeadInSheet(leadId, patch.fields, { email: auth.email, role: auth.role }, patch.ifOwnerIn);
+      if (result.status !== 200) return res.status(result.status).json(result.body);
+      await writeOpsAudit({ action: "lead.update", auth, targetId: leadId, details: { fields: patch.fields } });
+      if (body.event === "no_show") await forwardSalesEvent({ type: "demo_no_show", leadId });
+    }
+    // Notes live in the audit log so a lead's activity is one feed.
+    if (note) await writeOpsAudit({ action: "lead.note", auth, targetId: leadId, details: { text: note } });
+    if (call) await writeOpsAudit({ action: "lead.call", auth, targetId: leadId, details: call });
+    return res.json(result.body);
+  } catch (err) {
+    logger.error("lead update failed", err);
+    return res.status(502).json({ error: "upstream_error" });
+  }
+});
+
+app.get("/api/leads/:leadId/activity", requireRoles(SHEETS_ROLES), async (req, res) => {
+  const leadId = safeText(req.params.leadId);
+  if (!LEAD_ID_PATTERN.test(leadId)) return res.status(400).json({ error: "invalid_lead_id" });
+  try {
+    const snap = await getDataProjectDb()
+      .collection(OPS_AUDIT_COLLECTION)
+      .where("targetId", "==", leadId)
+      .limit(200)
+      .get();
+    const items = snap.docs
+      .map((doc) => doc.data() || {})
+      .map((d) => ({ action: d.action, actorEmail: d.actorEmail || null, createdAt: d.createdAt, details: d.details || {} }))
+      .sort((a, b) => parseMaybeDate(b.createdAt) - parseMaybeDate(a.createdAt));
+    return res.json({ items });
+  } catch (err) {
+    logger.error("lead activity failed", err);
+    return res.status(502).json({ error: "activity_unavailable" });
+  }
+});
+
+function unsubscribePage(title: string, body: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f6f7f9;color:#111827;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:16px}main{background:#fff;border:1px solid #e5e7eb;border-radius:12px;max-width:420px;padding:28px}h1{font-size:20px;margin:0 0 8px}p{color:#4b5563;line-height:1.5}button{background:#111827;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:15px;cursor:pointer}</style></head><body><main><h1>${title}</h1>${body}</main></body></html>`;
+}
+
+const UNSUBSCRIBE_NOT_FOUND = unsubscribePage("Link not found", "<p>This unsubscribe link is not valid.</p>");
+
+// Unsubscribe link in cold emails. GET only shows a confirm button, so mail scanners that
+// pre-fetch links can't unsubscribe anyone; the POST does the work.
+app.get("/u/:leadId", (req, res) => {
+  if (!LEAD_ID_PATTERN.test(safeText(req.params.leadId))) return res.status(404).send(UNSUBSCRIBE_NOT_FOUND);
+  res.setHeader("Cache-Control", "no-store");
+  return res.send(
+    unsubscribePage(
+      "Stop LearnXR emails?",
+      '<p>Confirm and we won\'t email this address again.</p><form method="post"><button type="submit">Unsubscribe</button></form>'
+    )
+  );
+});
+
+app.post("/u/:leadId", async (req, res) => {
+  const leadId = safeText(req.params.leadId);
+  if (!LEAD_ID_PATTERN.test(leadId)) return res.status(404).send(UNSUBSCRIBE_NOT_FOUND);
+  try {
+    // Only Do_not_contact: a customer who unsubscribes from outreach keeps their deal stage.
+    const result = await updateLeadInSheet(leadId, { Do_not_contact: `unsubscribed:${new Date().toISOString()}` }, { role: "lead" });
+    await writeOpsAudit({ action: "lead.unsubscribe", targetId: leadId, details: { status: result.status } });
+    if (result.status !== 200 && result.status !== 404) throw new Error(`lead update returned ${result.status}`);
+  } catch (err) {
+    logger.error("unsubscribe failed", err);
+    return res
+      .status(502)
+      .send(unsubscribePage("Something went wrong", "<p>Please reply &quot;unsubscribe&quot; to our email and we'll remove you.</p>"));
+  }
+  return res.send(unsubscribePage("You're unsubscribed", "<p>We won't email you again. Sorry for the interruption.</p>"));
+});
+
+// ---- School 360°: every contact and every touch for one school ----
+
+async function twilioMessagesFor(phone: string): Promise<TwilioMessage[]> {
+  const t = getTwilioConfig();
+  if (!t.ok) return [];
+  const auth = twilioBasicAuthHeader(t.accountSid, t.authToken);
+  const get = async (param: "To" | "From") => {
+    const url = new URL(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(t.accountSid)}/Messages.json`);
+    url.searchParams.set(param, `whatsapp:${phone}`);
+    url.searchParams.set("PageSize", "50");
+    const res = await fetch(url.toString(), { headers: { Authorization: auth }, signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { messages?: TwilioMessage[] };
+    return body.messages || [];
+  };
+  const [sent, received] = await Promise.all([get("To").catch(() => []), get("From").catch(() => [])]);
+  return [...sent, ...received];
+}
+
+app.get("/api/schools/:orgKey", requireRoles(SHEETS_ROLES), async (req, res) => {
+  const orgKey = safeText(req.params.orgKey).slice(0, 200);
+  if (!orgKey) return res.status(400).json({ message: "Missing school key." });
+  try {
+    const { rows: all } = await fetchSheetLeadRows({ limit: "5000" });
+    const rows = all.filter((r: Record<string, unknown>) => safeText(r.Org_key) === orgKey || safeText(r.Lead_id) === orgKey);
+    if (!rows.length) return res.status(404).json({ message: "No school with that key." });
+
+    const leadIds = rows.map((r: Record<string, unknown>) => safeText(r.Lead_id)).filter(Boolean).slice(0, 30);
+    const phones = [
+      ...new Set(rows.flatMap((r: Record<string, unknown>) => [toE164(r["Phone number"]), toE164(r.WhatsApp_number)]).filter(Boolean)),
+    ].slice(0, 5) as string[];
+
+    const [auditSnap, messages] = await Promise.all([
+      leadIds.length
+        ? getDataProjectDb().collection(OPS_AUDIT_COLLECTION).where("targetId", "in", leadIds).limit(300).get().catch(() => null)
+        : Promise.resolve(null),
+      Promise.all(phones.map((phone) => twilioMessagesFor(phone).catch(() => []))).then((lists) => lists.flat()),
+    ]);
+    const audit = auditSnap ? auditSnap.docs.map((d) => d.data() as Record<string, unknown>) : [];
+
+    const events = sortTimeline([...rows.flatMap(rowEvents), ...auditEvents(audit), ...messageEvents(messages)]).slice(0, 400);
+    const customer = await customerBlock(orgKey, rows).catch(() => null);
+    return res.json({ orgKey, ...schoolSummary(rows), phones, events, customer });
+  } catch (err) {
+    logger.error("school timeline failed", err);
+    return res.status(502).json({ message: "Could not build the school timeline." });
+  }
+});
+
+// ---- After-sale: link won schools to the LearnXR product, usage health, renewals ----
+
+/** The LearnXR product's Firestore (schools, classes, lesson launches). Needs datastore.viewer for this function. */
+function getProductDb() {
+  const { getFirestore } = adminFirestoreModule();
+  return getFirestore(getAuthProjectApp());
+}
+
+const CUSTOMER_LINKS = "customerLinks";
+const linkDocId = (orgKey: string) => orgKey.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200);
+
+function millis(v: unknown): number | null {
+  if (!v) return null;
+  if (typeof (v as { toMillis?: () => number }).toMillis === "function") return (v as { toMillis: () => number }).toMillis();
+  const t = Date.parse(String(v));
+  return Number.isFinite(t) ? t : null;
+}
+
+async function loadProductSchools(): Promise<ProductSchool[]> {
+  const snap = await getProductDb().collection("schools").limit(500).get();
+  return snap.docs.map((d) => {
+    const x = d.data() as Record<string, unknown>;
+    return { id: d.id, name: safeText(x.name), city: safeText(x.city), website: safeText(x.website), phone: safeText(x.contactPhone) };
+  });
+}
+
+/** Each product user at the school, with when they last ran a class session (teachers) or launched a lesson. */
+async function productUsage(productSchoolId: string) {
+  const db = getProductDb();
+  const [usersSnap, launchesSnap, sessionsSnap] = await Promise.all([
+    db.collection("users").where("school_id", "==", productSchoolId).limit(2000).get(),
+    db.collection("lesson_launches").where("school_id", "==", productSchoolId).limit(5000).get(),
+    db.collection("class_sessions").where("school_id", "==", productSchoolId).limit(5000).get(),
+  ]);
+  const last = new Map<string, number>();
+  const bump = (uid: unknown, t: number | null) => {
+    const id = safeText(uid);
+    if (id && t !== null && t > (last.get(id) || 0)) last.set(id, t);
+  };
+  for (const d of launchesSnap.docs) {
+    const x = d.data();
+    bump(x.student_id, millis(x.launched_at) ?? millis(x.updatedAt));
+  }
+  for (const d of sessionsSnap.docs) {
+    const x = d.data();
+    bump(x.teacher_uid, millis(x.created_at) ?? millis(x.updated_at));
+  }
+  return usersSnap.docs.map((d) => {
+    const x = d.data();
+    const role = safeText(x.userType || x.role).toLowerCase();
+    return { uid: d.id, role, lastActiveAt: last.get(d.id) ?? null };
+  });
+}
+
+type CustomerLink = { productSchoolId: string; productSchoolName?: string; renewalAt?: string | null; linkedBy?: string; linkedAt?: string };
+
+async function customerBlock(orgKey: string, rows: Record<string, unknown>[]) {
+  const isCustomer = rows.some((r) => safeText(r.Stage) === "Won");
+  const linkSnap = await getDataProjectDb().collection(CUSTOMER_LINKS).doc(linkDocId(orgKey)).get();
+  const link = linkSnap.exists ? (linkSnap.data() as CustomerLink) : null;
+  if (!isCustomer && !link) return null;
+  const renewalAt = millis(link?.renewalAt) ?? defaultRenewalAt(rows);
+  try {
+    if (!link?.productSchoolId) {
+      return { link: null, suggestions: suggestProductSchools(rows, await loadProductSchools()), health: null, renewalAt, productAccess: true };
+    }
+    const health = customerHealth({ users: await productUsage(link.productSchoolId), renewalAt });
+    return { link, suggestions: [], health, renewalAt, productAccess: true };
+  } catch (err) {
+    logger.warn("product data unavailable", String(err));
+    return { link, suggestions: [], health: null, renewalAt, productAccess: false };
+  }
+}
+
+app.post("/api/schools/:orgKey/link", requireRoles(STAFF_EDIT_ROLES), async (req, res) => {
+  const orgKey = safeText(req.params.orgKey).slice(0, 200);
+  const body = (req.body || {}) as Record<string, unknown>;
+  const productSchoolId = safeText(body.productSchoolId);
+  const renewalAt = safeText(body.renewalAt);
+  if (renewalAt && !isIsoDate(renewalAt)) return res.status(400).json({ message: "Renewal date is not valid." });
+  const ref = getDataProjectDb().collection(CUSTOMER_LINKS).doc(linkDocId(orgKey));
+  const auth = getAuthedUser(req);
+  if (!productSchoolId && !renewalAt && body.unlink === true) {
+    await ref.delete();
+    await writeOpsAudit({ action: "customer.unlink", auth, targetId: orgKey });
+    return res.json({ ok: true });
+  }
+  const update: Record<string, unknown> = { orgKey, linkedBy: auth?.email || null, linkedAt: new Date().toISOString() };
+  if (productSchoolId) {
+    let name = "";
+    try {
+      const doc = await getProductDb().collection("schools").doc(productSchoolId).get();
+      if (!doc.exists) return res.status(404).json({ message: "No such school in the LearnXR product." });
+      name = safeText(doc.data()?.name);
+    } catch {
+      return res.status(503).json({ message: "The dashboard can't read LearnXR product data yet." });
+    }
+    update.productSchoolId = productSchoolId;
+    update.productSchoolName = name;
+  }
+  if (renewalAt) update.renewalAt = renewalAt;
+  await ref.set(update, { merge: true });
+  await writeOpsAudit({ action: "customer.link", auth, targetId: orgKey, details: { productSchoolId, renewalAt } });
+  return res.json({ ok: true });
+});
+
+/** Won schools with their product link, usage health and renewal date. */
+app.get("/api/customers", requireRoles(SHEETS_ROLES), async (_req, res) => {
+  try {
+    const { rows } = await fetchSheetLeadRows({ limit: "5000" });
+    const byOrg = new Map<string, Record<string, unknown>[]>();
+    for (const r of rows as Record<string, unknown>[]) {
+      const key = safeText(r.Org_key) || safeText(r.Lead_id);
+      if (!key) continue;
+      if (!byOrg.has(key)) byOrg.set(key, []);
+      byOrg.get(key)!.push(r);
+    }
+    const won = [...byOrg.entries()].filter(([, rs]) => rs.some((r) => safeText(r.Stage) === "Won"));
+    const customers = await Promise.all(
+      won.map(async ([orgKey, rs]) => {
+        const block = await customerBlock(orgKey, rs);
+        const wonRow = rs.find((r) => safeText(r.Stage) === "Won")!;
+        return {
+          orgKey,
+          name: safeText(wonRow["School Name"]),
+          city: safeText(wonRow.City),
+          wonAt: safeText(wonRow.Won_at),
+          value: Number(safeText(wonRow.Paid_amount)) || Number(safeText(wonRow.Deal_value)) || 0,
+          owner: safeText(wonRow.Owner),
+          ...block,
+        };
+      })
+    );
+    return res.json({ customers });
+  } catch (err) {
+    logger.error("customers failed", err);
+    return res.status(502).json({ message: "Could not load customers." });
+  }
+});
+
+/** Daily: renewal reminders 60, 30 and 7 days before, once each. */
+app.post("/api/internal/renewal-check", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const { rows } = await fetchSheetLeadRows({ limit: "5000", fresh: "1" });
+  const byOrg = new Map<string, Record<string, unknown>[]>();
+  for (const r of rows as Record<string, unknown>[]) {
+    if (safeText(r.Stage) !== "Won") continue;
+    const key = safeText(r.Org_key) || safeText(r.Lead_id);
+    if (!byOrg.has(key)) byOrg.set(key, []);
+    byOrg.get(key)!.push(r);
+  }
+  const state = getDataProjectDb().collection(ALERT_STATE_COLLECTION);
+  const due: Array<{ ref: FirebaseFirestore.DocumentReference; line: string }> = [];
+  for (const [orgKey, rs] of byOrg) {
+    const link = (await getDataProjectDb().collection(CUSTOMER_LINKS).doc(linkDocId(orgKey)).get()).data() as CustomerLink | undefined;
+    const renewalAt = millis(link?.renewalAt) ?? defaultRenewalAt(rs);
+    if (!renewalAt) continue;
+    const reminder = renewalReminderDue(renewalAt);
+    if (!reminder) continue;
+    const ref = state.doc(`renewal-${linkDocId(orgKey)}-${new Date(renewalAt).toISOString().slice(0, 10)}-${reminder}`);
+    if ((await ref.get()).exists) continue;
+    due.push({ ref, line: `- ${safeText(rs[0]["School Name"])}: renews ${new Date(renewalAt).toISOString().slice(0, 10)} (${reminder}-day reminder)\n  https://agents.altiereality.com/schools/${encodeURIComponent(orgKey)}` });
+  }
+  if (due.length && (await postAlert(`${due.length} customer renewal(s) coming up`, ["Time to check in with these schools before they renew:", "", ...due.map((d) => d.line)].join("\n")))) {
+    await Promise.all(due.map((d) => d.ref.set({ lastSentAt: new Date().toISOString() })));
+  }
+  return res.json({ customers: byOrg.size, reminded: due.length });
+});
+
+// ---- Website forms → sales pipeline (contact form, report downloads), with a spam filter ----
+
+const FORM_SYNC = "formSync";
+
+async function syncForm(
+  key: string,
+  read: (after: unknown) => Promise<Array<{ id: string; createdAt: unknown; fields: Record<string, string> }>>,
+  source: string
+) {
+  const stateRef = getDataProjectDb().collection(FORM_SYNC).doc(key);
+  const cursor = (await stateRef.get()).data()?.cursor ?? null;
+  const items = await read(cursor);
+  let forwarded = 0;
+  let spam = 0;
+  let newest: unknown = cursor;
+  for (const item of items) {
+    const f = item.fields;
+    const reason = formSpamReason({ name: f.name, email: f.email, subject: f.subject, message: f.message });
+    if (reason) {
+      spam += 1;
+      await writeOpsAudit({ action: "form.spam", targetId: `${key}/${item.id}`, details: { reason, domain: (f.email || "").split("@")[1] || "" } });
+    } else {
+      const res = await fetch(`${N8N_WEBHOOK_BASE}/learnxr-website-lead`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: f.name,
+          organization: f.organization || "",
+          email: f.email,
+          phone: f.phone || "",
+          role: f.role || "",
+          source,
+          interest: f.subject || "",
+          message: [f.subject, f.message].filter(Boolean).join(" — ").slice(0, 900),
+          pageUrl: f.pageUrl || "",
+          submittedAt: new Date(millis(item.createdAt) ?? Date.now()).toISOString(),
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) throw new Error(`website-lead webhook returned ${res.status}`);
+      forwarded += 1;
+    }
+    newest = item.createdAt;
+    await stateRef.set({ cursor: newest, updatedAt: new Date().toISOString() }, { merge: true });
+  }
+  return { checked: items.length, forwarded, spam };
+}
+
+/** n8n calls this every 15 minutes. */
+app.post("/api/internal/forms-sync", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const out: Record<string, unknown> = {};
+  const text = (v: unknown) => safeText(v);
+  try {
+    out.contactForm = await syncForm(
+      "contactSubmissions",
+      async (after) => {
+        let q = getDataProjectDb().collection("contactSubmissions").orderBy("createdAt").limit(50);
+        if (after) q = q.where("createdAt", ">", after);
+        const snap = await q.get();
+        return snap.docs.map((d) => {
+          const x = d.data();
+          return { id: d.id, createdAt: x.createdAt, fields: { name: text(x.name), email: text(x.email), subject: text(x.subject), message: text(x.message) } };
+        });
+      },
+      "contact_form"
+    );
+  } catch (err) {
+    out.contactForm = { error: String(err) };
+  }
+  try {
+    out.reportDownloads = await syncForm(
+      "report_leads",
+      async (after) => {
+        let q = getProductDb().collection("report_leads").orderBy("createdAt").limit(50);
+        if (after) q = q.where("createdAt", ">", after);
+        const snap = await q.get();
+        return snap.docs.map((d) => {
+          const x = d.data();
+          return {
+            id: d.id,
+            createdAt: x.createdAt,
+            fields: {
+              name: text(x.name),
+              email: text(x.email),
+              organization: text(x.organization),
+              role: text(x.role),
+              subject: `Downloaded report: ${text(x.reportTitle)}`,
+              message: [text(x.country), text(x.role)].filter(Boolean).join(", "),
+              pageUrl: text(x.pageUrl),
+            },
+          };
+        });
+      },
+      "report_download"
+    );
+  } catch (err) {
+    out.reportDownloads = { error: String(err).slice(0, 200) };
+  }
+  return res.json(out);
+});
+
+// ---- Team: leaderboard, speed-to-lead SLA alerts, weekly digest ----
+
+/** Emails the alert recipients through Sales • Alerts. */
+async function postAlert(title: string, text: string): Promise<boolean> {
+  try {
+    const { status } = await callN8nWebhook("sales-alert", { method: "POST", body: { title, detail: text }, timeoutMs: 10_000 });
+    return status < 400;
+  } catch (err) {
+    logger.warn("alert post failed", err);
+    return false;
+  }
+}
+
+async function auditSince(fromIso: string, limit = 3000): Promise<Array<Record<string, any>>> {
+  const snap = await getDataProjectDb().collection(OPS_AUDIT_COLLECTION).where("createdAt", ">=", fromIso).limit(limit).get();
+  return snap.docs.map((d) => d.data() as Record<string, any>);
+}
+
+app.get("/api/team/leaderboard", requireRoles(SHEETS_ROLES), async (req, res) => {
+  const days = Math.min(Math.max(Number.parseInt(String(req.query.days || "7"), 10) || 7, 1), 92);
+  const to = Date.now();
+  const from = to - days * 86_400_000;
+  try {
+    const [{ rows }, audit] = await Promise.all([fetchSheetLeadRows({ limit: "5000" }), auditSince(new Date(from).toISOString())]);
+    return res.json({ days, from: new Date(from).toISOString(), reps: leaderboard(rows, audit, { from, to }), slaBreaches: slaBreaches(rows, to) });
+  } catch (err) {
+    logger.error("leaderboard failed", err);
+    return res.status(502).json({ message: "Could not build the leaderboard." });
+  }
+});
+
+/** n8n calls this every 30 minutes in business hours; each lead alerts once per level (owner, then manager). */
+app.post("/api/internal/sla-check", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const { rows } = await fetchSheetLeadRows({ limit: "5000", fresh: "1" });
+  const breaches = slaBreaches(rows);
+  const state = getDataProjectDb().collection(ALERT_STATE_COLLECTION);
+  const fresh = [];
+  for (const b of breaches) {
+    const ref = state.doc(`sla-${b.leadId}-${b.level}`.replace(/[^A-Za-z0-9_-]/g, "_"));
+    if ((await ref.get()).exists) continue;
+    fresh.push({ b, ref });
+  }
+  let alerted = false;
+  if (fresh.length) {
+    const { title, text } = slaAlert(fresh.map((f) => f.b));
+    alerted = await postAlert(title, text);
+    if (alerted) await Promise.all(fresh.map((f) => f.ref.set({ lastSentAt: new Date().toISOString(), level: f.b.level })));
+  }
+  return res.json({ breaches: breaches.length, newlyAlerted: alerted ? fresh.length : 0 });
+});
+
+/** n8n calls this on Monday mornings. */
+app.post("/api/internal/digest", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const now = Date.now();
+  const [{ rows }, audit] = await Promise.all([
+    fetchSheetLeadRows({ limit: "5000", fresh: "1" }),
+    auditSince(new Date(now - 7 * 86_400_000).toISOString()),
+  ]);
+  const digest = weeklyDigest(rows, audit, now);
+  const sent = req.query.dry === "1" ? false : await postAlert(digest.title, digest.text);
+  return res.json({ sent, ...digest });
+});
+
+// ---- Settings and system health (Admin page) ----
+
+let settingsCache: { at: number; value: AppSettings } | null = null;
+
+/** Settings with defaults filled in; cached for a minute because every page load asks for them. */
+async function loadSettings(fresh = false): Promise<AppSettings> {
+  if (!fresh && settingsCache && Date.now() - settingsCache.at < 60_000) return settingsCache.value;
+  let stored: unknown = null;
+  try {
+    const doc = await getDataProjectDb().doc(SETTINGS_DOC).get();
+    stored = doc.exists ? doc.data() : null;
+  } catch (err) {
+    logger.warn("settings read failed; using defaults", err);
+  }
+  const value = withDefaults(stored);
+  settingsCache = { at: Date.now(), value };
+  return value;
+}
+
+app.get("/api/settings", requireRoles(OPS_ROLES), async (_req, res) => {
+  return res.json(await loadSettings());
+});
+
+app.patch("/api/settings", requireRoles(ADMIN_ROLES), async (req, res) => {
+  const before = await loadSettings(true);
+  const next = applySettingsPatch(before, req.body);
+  if (typeof next === "string") return res.status(400).json({ message: next });
+  const changed = changedKeys(before, next);
+  if (!changed.length) return res.json(next);
+  await getDataProjectDb().doc(SETTINGS_DOC).set(next);
+  settingsCache = { at: Date.now(), value: next };
+  const details: Record<string, unknown> = {};
+  for (const key of changed) details[key] = { from: before[key], to: next[key] };
+  await writeOpsAudit({ action: "settings.update", auth: getAuthedUser(req), targetId: "settings", details });
+  return res.json(next);
+});
+
+/** n8n reads caps and modes here (X-Altie-Key), so they change without editing workflows. */
+app.get("/api/internal/settings", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  return res.json(await loadSettings());
+});
+
+/** The workflows the Admin page watches. */
+const HEALTH_WORKFLOWS = [
+  { id: SALES_FUNNEL_WORKFLOW_ID, name: "Sales • Outbound", role: "City runs, first emails, daily follow-ups" },
+  { id: "bq3CxiN0PNkkPS3H", name: "Sales • Inbound", role: "WhatsApp replies, website and Meta leads, email events" },
+  { id: "Kr0OoK8tBQsMwdhq", name: "Sales • Leads", role: "Reads and writes the lead sheet" },
+  { id: "X4VKYxULlC9eIwAF", name: "Sales • Alerts", role: "Hot-lead and failure emails" },
+];
+
+const istDay = (t: number) => new Date(t + 5.5 * 3_600_000).toISOString().slice(0, 10);
+
+app.get("/api/admin/health", requireRoles(ADMIN_ROLES), async (_req, res) => {
+  const { apiUrl, apiKey } = getN8nConfig();
+  const base = String(apiUrl || "").replace(/\/$/, "");
+  const workflows = await Promise.all(
+    HEALTH_WORKFLOWS.map(async (wf) => {
+      try {
+        const upstream = await fetch(`${base}/api/v1/executions?workflowId=${wf.id}&limit=100`, {
+          headers: { "X-N8N-API-KEY": String(apiKey || "") },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!upstream.ok) throw new Error(`n8n returned ${upstream.status}`);
+        const body = (await upstream.json()) as { data?: Array<Record<string, any>> };
+        const runs = (body.data || []).map((e) => ({
+          id: String(e.id),
+          status: String(e.status || (e.finished ? "success" : "unknown")),
+          mode: e.mode,
+          startedAt: String(e.startedAt || ""),
+          stoppedAt: e.stoppedAt,
+        }));
+        return { ...wf, ok: true, ...summarizeRuns(runs) };
+      } catch (err) {
+        return { ...wf, ok: false, error: String(err instanceof Error ? err.message : err) };
+      }
+    })
+  );
+
+  const settings = await loadSettings();
+  const today = istDay(Date.now());
+  let emailsToday: number | null = null;
+  try {
+    const { rows } = await fetchSheetLeadRows({ limit: "5000" });
+    const sentOn = (v: unknown) => {
+      const t = Date.parse(String(v || "").trim().replace(/^"|"$/g, ""));
+      return Number.isFinite(t) && istDay(t) === today;
+    };
+    emailsToday = rows.filter((r: Record<string, unknown>) => sentOn(r.Email_sent_at) || sentOn(r.Last_Follow_up)).length;
+  } catch (err) {
+    logger.warn("health: sheet read failed", err);
+  }
+
+  const db = getDataProjectDb();
+  const dayAgoIso = new Date(Date.now() - 86_400_000).toISOString();
+  const [failedSnap, snapshot] = await Promise.all([
+    db.collection(TWILIO_STATUS_COLLECTION).where("updatedAt", ">=", dayAgoIso).limit(500).get().catch(() => null),
+    readMetaSnapshot(),
+  ]);
+  const whatsappFailed24h = failedSnap
+    ? failedSnap.docs.filter((d) => ["failed", "undelivered"].includes(safeText(d.data().status).toLowerCase())).length
+    : null;
+
+  let templates: number | null = null;
+  const t = getTwilioConfig();
+  if (t.ok) templates = await listApprovedTemplates(t).then((list) => list.length).catch(() => null);
+
+  const productAccess = await getProductDb().collection("schools").limit(1).get().then(() => true).catch(() => false);
+
+  return res.json({
+    checkedAt: new Date().toISOString(),
+    productAccess,
+    workflows,
+    email: { sentToday: emailsToday, cap: settings.dailyEmailCap },
+    whatsapp: { failed24h: whatsappFailed24h, approvedTemplates: templates },
+    meta: {
+      mode: getMetaCreds() ? "live" : snapshot ? "snapshot" : "not connected",
+      snapshotAt: snapshot?.capturedAt || null,
+      adAccountId: META_AD_ACCOUNT_ID,
+    },
+    modes: { autoActions: settings.autoActionsMode, welcome: settings.welcomeMode },
+  });
+});
+
+// ---- Meta (Instagram/Facebook) ads: Social Ads page and lead-ads webhook ----
+
+function getMetaCreds(): MetaCreds | null {
+  const token = metaSystemTokenSecret.value();
+  const appSecret = metaAppSecret.value();
+  // The secrets must exist for deploys to work, so "unset" placeholders mean Meta isn't connected yet.
+  return token && appSecret && token !== "unset" && appSecret !== "unset" ? { token, appSecret } : null;
+}
+
+function metaRange(req: express.Request): string {
+  const range = typeof req.query.range === "string" ? req.query.range : "last_28d";
+  return META_RANGES.has(range) ? range : "last_28d";
+}
+
+function sendMetaError(res: express.Response, err: unknown, what: string) {
+  if (err instanceof MetaApiError) {
+    logger.warn(`Meta ${what} failed`, { status: err.status, code: err.code, message: err.message });
+    // Meta's 4xx usually means a setup or permission problem the page can show as is.
+    return res.status(err.status >= 400 && err.status < 500 ? 400 : 502).json({ message: err.message });
+  }
+  logger.error(`Meta ${what} failed`, err);
+  return res.status(502).json({ message: `Could not reach Meta (${what}).` });
+}
+
+/** Cached for 5 minutes: insights refresh slowly and the page polls on every visit. */
+const metaCache = new Map<string, { at: number; data: unknown }>();
+async function metaCached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const hit = metaCache.get(key);
+  if (hit && Date.now() - hit.at < 5 * 60_000) return hit.data as T;
+  const data = await load();
+  metaCache.set(key, { at: Date.now(), data });
+  return data;
+}
+
+/**
+ * Until the Meta token is set, Claude posts a read-only snapshot of the ad account (pulled through the Meta Ads MCP)
+ * and the read routes serve it, marked source: "snapshot".
+ */
+const META_SNAPSHOT_DOC = "metaSnapshots/latest";
+
+async function readMetaSnapshot(): Promise<Record<string, any> | null> {
+  try {
+    const doc = await getDataProjectDb().doc(META_SNAPSHOT_DOC).get();
+    return doc.exists ? (doc.data() as Record<string, any>) : null;
+  } catch (err) {
+    logger.warn("Meta snapshot read failed", err);
+    return null;
+  }
+}
+
+function hasAltieKey(req: express.Request): boolean {
+  const given = Buffer.from(String(req.get("x-altie-key") || ""));
+  const expected = Buffer.from(n8nWebhookSecret.value() || "");
+  return expected.length > 0 && given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+app.post("/api/meta/snapshot", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const body = req.body || {};
+  if (!body.ranges || typeof body.ranges !== "object") return res.status(400).json({ message: "ranges is required." });
+  const snapshot = {
+    capturedAt: typeof body.capturedAt === "string" ? body.capturedAt : new Date().toISOString(),
+    accountId: String(body.accountId || META_AD_ACCOUNT_ID),
+    note: typeof body.note === "string" ? body.note.slice(0, 300) : "",
+    ranges: body.ranges,
+    posts: Array.isArray(body.posts) ? body.posts.slice(0, 24) : [],
+  };
+  await getDataProjectDb().doc(META_SNAPSHOT_DOC).set(snapshot);
+  return res.json({ ok: true, capturedAt: snapshot.capturedAt });
+});
+
+app.get("/api/meta/overview", requireRoles(META_ROLES), async (req, res) => {
+  const creds = getMetaCreds();
+  const range = metaRange(req);
+  if (!creds) {
+    const snap = await readMetaSnapshot();
+    const overview = snap?.ranges?.[range]?.overview;
+    if (!overview) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+    return res.json({ range, accountId: snap.accountId, ...overview, source: "snapshot", capturedAt: snap.capturedAt, note: snap.note });
+  }
+  try {
+    return res.json({ range, accountId: META_AD_ACCOUNT_ID, ...(await metaCached(`overview:${range}`, () => getOverview(creds, range))) });
+  } catch (err) {
+    return sendMetaError(res, err, "overview");
+  }
+});
+
+app.get("/api/meta/campaigns", requireRoles(META_ROLES), async (req, res) => {
+  const creds = getMetaCreds();
+  const range = metaRange(req);
+  if (!creds) {
+    const snap = await readMetaSnapshot();
+    const campaigns = snap?.ranges?.[range]?.campaigns;
+    if (!Array.isArray(campaigns)) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+    return res.json({
+      range,
+      accountId: snap.accountId,
+      maxDailyBudget: (await loadSettings()).metaMaxDailyBudgetInr,
+      campaigns,
+      source: "snapshot",
+      capturedAt: snap.capturedAt,
+    });
+  }
+  try {
+    const fresh = req.query.fresh === "1";
+    const campaigns = fresh ? await listCampaigns(creds, range) : await metaCached(`campaigns:${range}`, () => listCampaigns(creds, range));
+    if (fresh) metaCache.set(`campaigns:${range}`, { at: Date.now(), data: campaigns });
+    return res.json({ range, accountId: META_AD_ACCOUNT_ID, maxDailyBudget: (await loadSettings()).metaMaxDailyBudgetInr, campaigns });
+  } catch (err) {
+    return sendMetaError(res, err, "campaigns");
+  }
+});
+
+app.get("/api/meta/ig-media", requireRoles(META_ROLES), async (_req, res) => {
+  const creds = getMetaCreds();
+  if (!creds) {
+    const snap = await readMetaSnapshot();
+    if (!snap) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+    if (!snap.posts?.length) {
+      return res.status(503).json({ message: "Instagram posts aren't available yet: @learn__xr isn't connected to an ad account." });
+    }
+    return res.json({ media: snap.posts, source: "snapshot", capturedAt: snap.capturedAt });
+  }
+  try {
+    return res.json({ media: await metaCached("ig-media", () => listInstagramMedia(creds)) });
+  } catch (err) {
+    return sendMetaError(res, err, "Instagram posts");
+  }
+});
+
+app.patch("/api/meta/entities/:id", requireRoles(META_WRITE_ROLES), async (req, res) => {
+  const creds = getMetaCreds();
+  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+  const change = parseEntityChange(req.body, (await loadSettings()).metaMaxDailyBudgetInr);
+  if (typeof change === "string") return res.status(400).json({ message: change });
+  const id = safeText(req.params.id);
+  try {
+    const result = await updateEntity(creds, id, change);
+    metaCache.clear();
+    await writeOpsAudit({ action: "meta.entity.update", auth: getAuthedUser(req), targetId: id, details: { ...change } });
+    return res.json(result);
+  } catch (err) {
+    return sendMetaError(res, err, "update");
+  }
+});
+
+app.post("/api/meta/boost", requireRoles(META_WRITE_ROLES), async (req, res) => {
+  const creds = getMetaCreds();
+  if (!creds) return res.status(503).json({ message: "Meta is not connected on this function yet." });
+  const boost = parseBoostRequest(req.body, (await loadSettings()).metaMaxDailyBudgetInr);
+  if (typeof boost === "string") return res.status(400).json({ message: boost });
+  const auth = getAuthedUser(req);
+  try {
+    const result = await boostInstagramPost(creds, boost, auth?.email || auth?.uid || "unknown");
+    metaCache.clear();
+    await writeOpsAudit({
+      action: "meta.boost.create",
+      auth,
+      targetId: result.campaignId,
+      details: { ...boost, adsetId: result.adsetId, adId: result.adId },
+    });
+    return res.status(201).json(result);
+  } catch (err) {
+    return sendMetaError(res, err, "boost");
+  }
+});
+
+// Meta calls this once when the webhook is set up in the app dashboard.
+app.get("/api/meta/webhook", (req, res) => {
+  const expected = metaVerifyTokenSecret.value();
+  if (req.query["hub.mode"] === "subscribe" && expected && req.query["hub.verify_token"] === expected) {
+    return res.status(200).send(String(req.query["hub.challenge"] || ""));
+  }
+  return res.status(403).send("Forbidden");
+});
+
+app.post("/api/meta/webhook", async (req, res) => {
+  const creds = getMetaCreds();
+  const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody;
+  if (!creds || !verifyMetaSignature(rawBody, req.get("x-hub-signature-256"), creds.appSecret)) {
+    return res.status(401).send("Bad signature");
+  }
+  const leadIds: string[] = [];
+  for (const entry of Array.isArray(req.body?.entry) ? req.body.entry : []) {
+    for (const change of Array.isArray(entry?.changes) ? entry.changes : []) {
+      if (change?.field === "leadgen" && change.value?.leadgen_id) leadIds.push(String(change.value.leadgen_id));
+    }
+  }
+  // Meta retries anything that isn't a quick 200, so failures are logged rather than returned.
+  for (const leadgenId of leadIds) {
+    try {
+      await forwardSalesEvent(leadToSalesEvent(await fetchLead(creds, leadgenId)));
+    } catch (err) {
+      logger.error("Meta lead fetch failed", { leadgenId, error: String(err) });
+    }
+  }
+  return res.status(200).send("ok");
+});
+
 // Auth-gated fallback for hosting rewrite path variants (n8n only)
 app.get(/.*/, async (req, res) => {
   const originalUrl = req.originalUrl || req.url || "";
@@ -2166,10 +3305,14 @@ export const api = onRequest(
     secrets: [
       n8nApiUrlSecret,
       n8nApiKeySecret,
+      n8nWebhookSecret,
       twilioAccountSidSecret,
       twilioAuthTokenSecret,
       twilioMessagingServiceSidSecret,
       twilioWhatsappFromSecret,
+      metaSystemTokenSecret,
+      metaAppSecret,
+      metaVerifyTokenSecret,
     ],
   },
   app

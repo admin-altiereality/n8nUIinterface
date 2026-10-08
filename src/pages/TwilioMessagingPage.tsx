@@ -12,11 +12,28 @@ import {
   X,
   Plus,
 } from 'lucide-react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Badge } from '../components/ui/badge';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
+import { Select } from '../components/ui/select';
 import { Avatar } from '../components/ui/avatar';
+import { useAuth } from '../context/AuthContext';
+import type { SchoolLeadRow } from '../api/sheetsClient';
+import { useSheetLeads } from '../lib/useSheetLeads';
+import { useAppSettings } from '../lib/useAppSettings';
+import { useLeadUpdate } from '../lib/useLeadUpdate';
+import {
+  BOOKING_URL,
+  WHATSAPP_WINDOW_MS,
+  bookingLink,
+  field,
+  isChannelPartner,
+  ownerLabel,
+  stageOf,
+  whatsappWindowLeftMs,
+} from '../lib/pipeline';
+import { arrangeTemplates, sentTemplates, suggestedKeys, templatesFor, type Audience } from '../lib/waTemplates';
 import {
   fetchTwilioHealth,
   fetchTwilioStatuses,
@@ -51,24 +68,101 @@ type QueueFilter = 'all' | 'needsFollowUp' | 'highRisk' | 'failed' | 'seen';
 
 const STATUS_POLL_MS = 10000;
 const INBOUND_POLL_MS = 12000;
-const DOCUMENT_TEMPLATE_SID = 'HX9fab5aaad062c64423df7a312c84e6af';
 const MAX_WHATSAPP_MEDIA_BYTES = 16 * 1024 * 1024;
 const SUPPORTED_ATTACHMENT_TYPES = /^(image\/|video\/|audio\/|application\/pdf$)/i;
+/** Per-browser "last opened" time for each chat; unread counts are inbound messages after it. */
+const SEEN_STORAGE_KEY = 'twilio_thread_seen_at';
+/** Roles that can read the lead sheet, so chats can show the school and its stage. */
+const LEAD_ROLES = ['superadmin', 'associate', 'salesperson'];
 
 type TwilioServiceState = 'unknown' | 'ok' | 'suspended';
+type SeenAt = Record<string, number>;
 
 function normalizeParty(value: string | undefined): string {
   if (!value) return 'Unknown';
   return value.replace(/^whatsapp:/i, '').trim() || 'Unknown';
 }
 
+/** Always a WhatsApp address: a bare +E164 number would otherwise go out as an SMS. */
 function normalizeRecipient(value: string): string {
-  const val = value.trim();
+  const val = value.trim().replace(/[\s()-]/g, '');
   if (!val) return '';
-  if (val.startsWith('whatsapp:') || val.startsWith('+')) return val;
+  if (val.startsWith('whatsapp:')) return val;
+  if (val.startsWith('+')) return `whatsapp:${val}`;
   if (/^\d{10}$/.test(val)) return `whatsapp:+91${val}`;
+  if (/^0\d{10}$/.test(val)) return `whatsapp:+91${val.slice(1)}`;
   if (/^\d+$/.test(val)) return `whatsapp:+${val}`;
   return `whatsapp:${val}`;
+}
+
+/** E.164 form used to match a chat to a lead (the sheet stores Indian numbers in many formats). */
+function e164(value: string): string {
+  const raw = value.replace(/^whatsapp:/i, '').trim();
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return '';
+  if (raw.startsWith('+')) return `+${digits}`;
+  if (/^[6-9]\d{9}$/.test(digits)) return `+91${digits}`;
+  if (/^0[6-9]\d{9}$/.test(digits)) return `+91${digits.slice(1)}`;
+  return `+${digits}`;
+}
+
+function readSeen(): SeenAt {
+  try {
+    const seen = JSON.parse(localStorage.getItem(SEEN_STORAGE_KEY) || '{}') as SeenAt;
+    // The first visit counts everything older as read, so old chats don't all light up.
+    if (!seen.__since) seen.__since = Date.now();
+    return seen;
+  } catch {
+    return { __since: Date.now() };
+  }
+}
+
+function writeSeen(seen: SeenAt) {
+  try {
+    localStorage.setItem(SEEN_STORAGE_KEY, JSON.stringify(seen));
+  } catch {
+    // Private windows can refuse storage; unread counts then reset on reload.
+  }
+}
+
+function fillTemplate(body: string, values: Record<string, string>): string {
+  return body.replace(/\{\{(\d+)\}\}/g, (match, key: string) => values[key] || match);
+}
+
+/** Our lxr_* templates share one variable convention (see selectTemplate) and an _en / _hi suffix. */
+const LXR_TEMPLATE = /^lxr_/;
+
+function templateLabel(t: TwilioTemplate): string {
+  const lang = t.name.endsWith('_hi') ? 'हिंदी' : t.name.endsWith('_en') ? 'EN' : '';
+  const base = LXR_TEMPLATE.test(t.name) ? t.name.replace(/^lxr_(partner|school)_/, '').replace(/_(en|hi)$/, '').replace(/_/g, ' ') : t.name;
+  return lang ? `${base} · ${lang}` : base;
+}
+
+/** Channel partner, then school, then everything else; onboarding steps in order, English before Hindi. */
+function groupTemplates(templates: TwilioTemplate[]): Array<[string, TwilioTemplate[]]> {
+  const groups: Array<[string, RegExp]> = [
+    ['Channel partner', /^lxr_partner_/],
+    ['School', /^lxr_school_/],
+  ];
+  const rank = (name: string) => (/_step\d/.test(name) ? 1 : 0) + (name.endsWith('_hi') ? 0.5 : 0);
+  const ordered = (items: TwilioTemplate[]) =>
+    [...items].sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name));
+  const result: Array<[string, TwilioTemplate[]]> = groups
+    .map(([label, re]): [string, TwilioTemplate[]] => [label, ordered(templates.filter((t) => re.test(t.name)))])
+    .filter(([, items]) => items.length > 0);
+  const other = templates.filter((t) => !groups.some(([, re]) => re.test(t.name)));
+  if (other.length) result.push(['Other', other]);
+  return result;
+}
+
+function templateOption(t: TwilioTemplate, suffix = '') {
+  return (
+    <option key={t.sid} value={t.sid}>
+      {templateLabel(t)}
+      {t.category ? ` · ${t.category.toLowerCase()}` : ''}
+      {suffix}
+    </option>
+  );
 }
 
 function isInbound(direction: string | undefined): boolean {
@@ -100,7 +194,7 @@ function getContactForThread(message: TwilioMessage): string {
   return isInbound(message.direction) ? normalizeParty(message.from) : normalizeParty(message.to);
 }
 
-function buildThreads(messages: TwilioMessage[]): Thread[] {
+function buildThreads(messages: TwilioMessage[], seen: SeenAt): Thread[] {
   const grouped = new Map<string, TwilioMessage[]>();
   for (const message of messages) {
     const key = getContactForThread(message);
@@ -113,7 +207,8 @@ function buildThreads(messages: TwilioMessage[]): Thread[] {
     const last = sorted[sorted.length - 1];
     const latest = [...sorted].reverse();
     const preferredAddress = latest.find((m) => isInbound(m.direction))?.from || latest.find((m) => !isInbound(m.direction))?.to || key;
-    const unreadCount = sorted.filter((m) => isInbound(m.direction) && String(m.status || '').toLowerCase() !== 'read').length;
+    const seenAt = Math.max(seen[key] || 0, seen.__since || 0);
+    const unreadCount = sorted.filter((m) => isInbound(m.direction) && messageTime(m) > seenAt).length;
     const lastTextRaw = (last && last.body) || (last && Array.isArray(last.media) && last.media.length > 0 ? 'Attachment' : '(No text)');
     threads.push({ id: key, contact: key, sendTo: preferredAddress, lastText: String(lastTextRaw).slice(0, 72), lastAt: messageTime(last), unreadCount, messages: sorted });
   }
@@ -216,6 +311,7 @@ function attachmentKind(file: File): string {
 export default function TwilioMessagingPage() {
   const [searchParams] = useSearchParams();
   const [health, setHealth] = useState<TwilioHealth>({ ok: false, accountHint: null });
+  const appSettings = useAppSettings();
   const [messages, setMessages] = useState<TwilioMessage[]>([]);
   const [nextPageToken, setNextPageToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -242,6 +338,29 @@ export default function TwilioMessagingPage() {
   const [diagnostics, setDiagnostics] = useState<TwilioSendDiagnostic[]>([]);
   const [assignment, setAssignment] = useState<LeadAssignment | null>(null);
   const [assignmentSaving, setAssignmentSaving] = useState(false);
+  const [loadedOnce, setLoadedOnce] = useState(false);
+  const [deepLinkContact, setDeepLinkContact] = useState<string | null>(null);
+  const [seen, setSeen] = useState<SeenAt>(readSeen);
+  const [templateSid, setTemplateSid] = useState('');
+  const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
+  // Within the 24-hour window the composer is free text; this switches it to the template picker.
+  const [forceTemplate, setForceTemplate] = useState(false);
+
+  const { user } = useAuth();
+  const me = (user?.email || '').toLowerCase();
+  const { leads, replaceLead } = useSheetLeads({ enabled: Boolean(user && LEAD_ROLES.includes(user.role)) });
+  const { update: updateLead, busy: leadBusy, error: leadError } = useLeadUpdate(replaceLead);
+  const leadByPhone = useMemo(() => {
+    const map = new Map<string, SchoolLeadRow>();
+    for (const row of leads) {
+      for (const key of ['WhatsApp_number', 'Phone number']) {
+        const phone = e164(field(row, key));
+        if (phone && !map.has(phone)) map.set(phone, row);
+      }
+    }
+    return map;
+  }, [leads]);
+  const leadFor = useCallback((contact: string) => leadByPhone.get(e164(contact)) || null, [leadByPhone]);
 
   const firebaseEnabled = useMemo(() => isFirebaseConfigured(), []);
   const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
@@ -287,6 +406,7 @@ export default function TwilioMessagingPage() {
       }
     } finally {
       setLoading(false);
+      setLoadedOnce(true);
     }
   }, [markSuspended]);
 
@@ -339,14 +459,10 @@ export default function TwilioMessagingPage() {
     };
   }, [serviceState]);
 
-  // Deep-link from Sales Funnel leads: /twilio-messaging?contact=+91...
+  // Deep link from leads and alerts: /twilio-messaging?contact=+91...
   useEffect(() => {
     const contact = searchParams.get('contact');
-    if (!contact) return;
-    const normalized = normalizeParty(contact);
-    setSelectedThreadId(normalized);
-    setIsNewChatMode(false);
-    setSearch(normalized);
+    if (contact) setDeepLinkContact(e164(contact) || normalizeParty(contact));
   }, [searchParams]);
 
   // Poll delivery/read status for non-terminal outbound messages
@@ -392,12 +508,31 @@ export default function TwilioMessagingPage() {
   }, [serviceState]);
 
   const twilioSuspended = serviceState === 'suspended';
-  const threads = useMemo(() => buildThreads(messages), [messages]);
+  const threads = useMemo(() => buildThreads(messages, seen), [messages, seen]);
   const filteredThreads = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return threads;
-    return threads.filter((thread) => { if (thread.contact.toLowerCase().includes(q)) return true; return thread.messages.some((m) => String(m.body || '').toLowerCase().includes(q)); });
-  }, [threads, search]);
+    return threads.filter((thread) => {
+      if (thread.contact.toLowerCase().includes(q)) return true;
+      const lead = leadFor(thread.contact);
+      if (lead && field(lead, 'School Name').toLowerCase().includes(q)) return true;
+      return thread.messages.some((m) => String(m.body || '').toLowerCase().includes(q));
+    });
+  }, [threads, search, leadFor]);
+
+  // Once the first page has loaded, open the linked chat, or a new chat when there is no history with that number.
+  useEffect(() => {
+    if (!deepLinkContact || !loadedOnce) return;
+    if (threads.some((t) => t.id === deepLinkContact)) {
+      setSelectedThreadId(deepLinkContact);
+      setIsNewChatMode(false);
+    } else {
+      setSelectedThreadId(null);
+      setIsNewChatMode(true);
+      setManualTo(deepLinkContact);
+    }
+    setDeepLinkContact(null);
+  }, [deepLinkContact, loadedOnce, threads]);
 
   const queueFilteredThreads = useMemo(() => {
     return filteredThreads.filter((thread) => {
@@ -429,15 +564,100 @@ export default function TwilioMessagingPage() {
   const activeThread = useMemo(() => (isNewChatMode ? null : queueFilteredThreads.find((thread) => thread.id === selectedThreadId) || queueFilteredThreads[0] || null), [queueFilteredThreads, selectedThreadId, isNewChatMode]);
   const activeFollowUp = useMemo(() => (activeThread ? followUpState(activeThread) : null), [activeThread]);
   const normalizedManualTo = useMemo(() => normalizeRecipient(manualTo), [manualTo]);
+  const activeContact = isNewChatMode ? normalizedManualTo : activeThread?.contact || '';
+  const activeLead = activeContact ? leadFor(activeContact) : null;
+  const activeLeadOwner = activeLead ? field(activeLead, 'Owner').toLowerCase() : '';
 
+  // WhatsApp allows free-form messages only within 24 hours of the contact's last message. The sheet's
+  // reply time covers chats whose messages aren't in the loaded history.
+  const lastInbound = activeThread && !isNewChatMode ? threadLastInbound(activeThread) : null;
+  const templateOnly = !(
+    (lastInbound && Date.now() - messageTime(lastInbound) < WHATSAPP_WINDOW_MS) ||
+    (activeLead && whatsappWindowLeftMs(activeLead) !== null)
+  );
+  const templateMode = templateOnly || forceTemplate;
+
+  // A partner's chat offers partner templates, a school's chat school ones; the next step is suggested and
+  // templates this contact already got (read from our sent messages) go last.
+  const audience: Audience = activeLead ? (isChannelPartner(activeLead) ? 'partner' : 'school') : 'all';
+  const templateOptions = useMemo(() => {
+    const offered = templatesFor(templates, audience);
+    const sentBodies = (activeThread && !isNewChatMode ? activeThread.messages : [])
+      .filter((m) => !isInbound(m.direction) && !['failed', 'undelivered'].includes(String(m.status || '').toLowerCase()))
+      .sort((a, b) => messageTime(a) - messageTime(b))
+      .map((m) => m.body || '');
+    const sent = sentTemplates(offered, sentBodies);
+    const suggested = suggestedKeys(offered, audience, sent.keys, {
+      stage: activeLead ? stageOf(activeLead) : 'New',
+      replyIntent: activeLead ? field(activeLead, 'Reply_intent') : '',
+    });
+    return { offered, ...arrangeTemplates(offered, suggested, sent.keys, sent.lastLang) };
+  }, [templates, audience, activeThread, isNewChatMode, activeLead]);
+  const selectedTemplate = templates.find((t) => t.sid === templateSid) || null;
+  const missingTemplateVars = (selectedTemplate?.variableKeys || []).filter((key) => !templateVars[key]?.trim());
+  const cannedReplies = [
+    {
+      label: 'Booking link',
+      text: `You can pick a time for a 30-minute LearnXR demo here: ${
+        activeLead && field(activeLead, 'Lead_id') ? bookingLink(field(activeLead, 'Lead_id')) : BOOKING_URL
+      }`,
+    },
+    { label: 'Ask for a call time', text: 'Thanks for your interest in LearnXR! When is a good time for a quick call?' },
+    // Team templates from Admin → Settings; {{name}} and {{school}} are filled from the lead.
+    ...(appSettings?.replyTemplates || []).map((t) => ({
+      label: t.title,
+      text: t.body
+        .replace(/\{\{\s*name\s*\}\}/gi, (activeLead && field(activeLead, 'Principal Name')) || 'there')
+        .replace(/\{\{\s*school\s*\}\}/gi, (activeLead && field(activeLead, 'School Name')) || 'your school'),
+    })),
+  ];
+
+  const selectTemplate = (sid: string) => {
+    setTemplateSid(sid);
+    const template = templates.find((t) => t.sid === sid);
+    if (template && LXR_TEMPLATE.test(template.name)) {
+      // {{1}} = recipient's first name, {{2}} = sender's name; {{3}} (a link or date) is typed per send.
+      const firstName = (s: string) => s.trim().split(/\s+/)[0] || '';
+      const vars: Record<string, string> = {};
+      for (const key of template.variableKeys || []) {
+        if (key === '1') vars[key] = activeLead ? firstName(field(activeLead, 'Principal Name')) : '';
+        else if (key === '2') vars[key] = firstName(user?.name || '');
+        else vars[key] = '';
+      }
+      setTemplateVars(vars);
+      return;
+    }
+    setTemplateVars({ ...(template?.variables || {}) });
+  };
+
+  // Opening a chat marks it read in this browser.
+  const activeThreadKey = isNewChatMode ? undefined : activeThread?.id;
+  // Another chat may be offered other templates.
+  useEffect(() => {
+    setForceTemplate(false);
+    setTemplateSid('');
+    setTemplateVars({});
+  }, [activeThreadKey]);
+  const activeThreadLastAt = activeThread?.lastAt;
+  useEffect(() => {
+    if (!activeThreadKey) return;
+    setSeen((prev) => {
+      const next = { ...prev, [activeThreadKey]: Date.now() };
+      writeSeen(next);
+      return next;
+    });
+  }, [activeThreadKey, activeThreadLastAt]);
+
+  // Numbers that belong to a lead are claimed through the lead's Owner; others use chat assignments.
+  const hasActiveLead = Boolean(activeLead);
   useEffect(() => {
     const threadId = activeThread?.sendTo || activeThread?.contact;
-    if (!threadId || isNewChatMode) {
+    if (!threadId || isNewChatMode || hasActiveLead) {
       setAssignment(null);
       return;
     }
     void fetchLeadAssignment(threadId).then(setAssignment).catch(() => setAssignment(null));
-  }, [activeThread?.sendTo, activeThread?.contact, isNewChatMode]);
+  }, [activeThread?.sendTo, activeThread?.contact, isNewChatMode, hasActiveLead]);
 
   useEffect(() => {
     if (!autoScroll) return;
@@ -451,13 +671,14 @@ export default function TwilioMessagingPage() {
     }
     const to = isNewChatMode ? normalizedManualTo : activeThread?.sendTo;
     const text = composerText.trim();
-    if (!to || (!text && !attachmentFile)) return;
+    if (!to) return;
+    if (templateMode ? !selectedTemplate || missingTemplateVars.length > 0 : !text && !attachmentFile) return;
     setSending(true); setSendInfo(null); setSendDiagnostic(null);
     try {
       setAutoScroll(true);
       let mediaUrl: string | undefined;
       let mediaFilename: string | undefined;
-      if (attachmentFile) {
+      if (!templateMode && attachmentFile) {
         setSendInfo(`Uploading ${attachmentFile.name}…`);
         if (!firebaseEnabled) throw new Error('Firebase is not configured for media uploads.');
         const uploaded = await uploadTwilioMediaToStorage(attachmentFile, { pathPrefix: 'twilio-media' });
@@ -466,13 +687,25 @@ export default function TwilioMessagingPage() {
         setSendInfo('Media uploaded. Sending to WhatsApp…');
       }
       const bodyToSend = attachmentFile ? (text || `Please review ${attachmentFile.name}.`) : text;
-      const sent = await sendTwilioMessage({
-        to,
-        body: bodyToSend,
-        mediaUrl,
-        mediaFilename,
-        templateSid: undefined,
-      });
+      const sent = await sendTwilioMessage(
+        templateMode && selectedTemplate
+          ? {
+              to,
+              body: '',
+              templateSid: selectedTemplate.sid,
+              templateVariables: Object.fromEntries(
+                (selectedTemplate.variableKeys || []).map((key) => [key, templateVars[key].trim()])
+              ),
+            }
+          : { to, body: bodyToSend, mediaUrl, mediaFilename, templateSid: undefined }
+      );
+      // A WhatsApp sent to a lead counts as its first touch for speed-to-lead (the sheet keeps the first one).
+      if (activeLead) void updateLead(activeLead, { touch: 'whatsapp' }, {}, 'touch');
+      if (templateMode) {
+        setTemplateSid('');
+        setTemplateVars({});
+        setForceTemplate(false);
+      }
       setComposerText('');
       if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
       setAttachmentPreviewUrl(null); setAttachmentFile(null);
@@ -507,8 +740,17 @@ export default function TwilioMessagingPage() {
     finally { setSending(false); }
   };
 
+  const claimOwner = activeLead
+    ? activeLeadOwner
+    : String(assignment?.assignedToEmail || (assignment?.assignedTo ? 'Claimed' : ''));
+  const claimSaving = activeLead ? Boolean(leadBusy) : assignmentSaving;
   const recipient = activeThread ? activeThread.sendTo : manualTo.trim();
-  const canSend = Boolean(recipient && !sending && !twilioSuspended && (composerText.trim() || attachmentFile));
+  const canSend = Boolean(
+    recipient &&
+      !sending &&
+      !twilioSuspended &&
+      (templateMode ? selectedTemplate && !missingTemplateVars.length : composerText.trim() || attachmentFile)
+  );
 
   const removeAttachment = () => {
     if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
@@ -516,6 +758,11 @@ export default function TwilioMessagingPage() {
   };
 
   const onAssignment = async (action: 'claim' | 'unclaim') => {
+    if (activeLead) {
+      const claim = action === 'claim';
+      await updateLead(activeLead, { fields: { Owner: claim ? 'me' : '' } }, { Owner: claim ? me : '' }, 'claim');
+      return;
+    }
     const threadId = activeThread?.sendTo || activeThread?.contact;
     if (!threadId) return;
     setAssignmentSaving(true);
@@ -637,17 +884,20 @@ export default function TwilioMessagingPage() {
                 const selected = activeThread?.id === thread.id && !isNewChatMode;
                 const state = followUpState(thread);
                 const badge = outboundStatusBadge(state.lastOutboundStatus);
+                const lead = leadFor(thread.contact);
+                const title = (lead && field(lead, 'School Name')) || thread.contact;
                 return (
                   <button key={thread.id} onClick={() => { setSelectedThreadId(thread.id); setIsNewChatMode(false); }} className={`chat-thread-item ${selected ? 'active' : ''}`}>
-                    <Avatar name={thread.contact} size="md" />
+                    <Avatar name={title} size="md" />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between mb-0.5">
-                        <p className="text-[13px] font-medium text-zinc-200 truncate">{thread.contact}</p>
+                        <p className="text-[13px] font-medium text-zinc-200 truncate" title={thread.contact}>{title}</p>
                         <span className="text-[10px] text-zinc-600 flex-shrink-0 ml-2">{smartDate(thread.lastAt)}</span>
                       </div>
                       <div className="flex items-center justify-between">
                         <p className="text-[12px] text-zinc-500 truncate">{thread.lastText || 'Sent media'}</p>
                         <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
+                          {lead && <span className="text-[9px] text-indigo-300">{stageOf(lead)}</span>}
                           {badge && (
                             <span className={`text-[9px] font-medium capitalize ${badge.className}`}>{badge.label}</span>
                           )}
@@ -678,11 +928,27 @@ export default function TwilioMessagingPage() {
           {/* Header */}
           <div className="chat-main-header">
             <div className="flex items-center gap-3">
-              <Avatar name={isNewChatMode ? 'New' : activeThread?.contact} size="md" />
+              <Avatar name={activeLead ? field(activeLead, 'School Name') : isNewChatMode ? 'New' : activeThread?.contact} size="md" />
               <div>
-                <h3 className="text-sm font-semibold text-zinc-100">{isNewChatMode ? 'New Conversation' : activeThread ? activeThread.contact : 'Select a chat'}</h3>
+                <h3 className="text-sm font-semibold text-zinc-100">
+                  {activeLead
+                    ? field(activeLead, 'School Name') || normalizeParty(activeContact)
+                    : isNewChatMode ? 'New Conversation' : activeThread ? activeThread.contact : 'Select a chat'}
+                </h3>
                 <p className="text-[11px] text-zinc-500">
-                  {isNewChatMode
+                  {activeLead ? (
+                    <>
+                      {normalizeParty(activeContact)} · {stageOf(activeLead)}
+                      {field(activeLead, 'Lead_id') && (
+                        <>
+                          {' · '}
+                          <Link to={`/sales?lead=${encodeURIComponent(field(activeLead, 'Lead_id'))}`} className="text-sky-400 hover:underline">
+                            Open lead
+                          </Link>
+                        </>
+                      )}
+                    </>
+                  ) : isNewChatMode
                     ? 'Enter recipient below'
                     : activeThread
                       ? (() => {
@@ -692,29 +958,29 @@ export default function TwilioMessagingPage() {
                         })()
                       : ''}
                 </p>
+                {leadError && <p className="text-[10px] text-amber-400">{leadError}</p>}
               </div>
             </div>
             <div className="flex items-center gap-1">
-              {activeThread && !isNewChatMode && (
+              {(activeLead || (activeThread && !isNewChatMode)) && (
                 <>
-                  {assignment?.assignedTo ? (
+                  {claimOwner ? (
                     <Badge variant="info" className="mr-2 text-[9px]">
-                      {assignment.assignedToEmail || 'Claimed'}
+                      {claimOwner === me ? 'You' : claimOwner.includes('@') ? ownerLabel(claimOwner) : claimOwner}
                     </Badge>
                   ) : (
                     <Badge variant="outline" className="mr-2 text-[9px]">Unassigned</Badge>
                   )}
-                  <button
-                    onClick={() => void onAssignment(assignment?.assignedTo ? 'unclaim' : 'claim')}
-                    disabled={assignmentSaving}
-                    className="mr-2 rounded-md border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 transition-all hover:bg-zinc-800 disabled:opacity-40"
-                  >
-                    {assignmentSaving ? 'Saving...' : assignment?.assignedTo ? 'Unclaim' : 'Claim'}
-                  </button>
+                  {(!activeLead || !activeLeadOwner || activeLeadOwner === me) && (
+                    <button
+                      onClick={() => void onAssignment(claimOwner ? 'unclaim' : 'claim')}
+                      disabled={claimSaving}
+                      className="mr-2 rounded-md border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 transition-all hover:bg-zinc-800 disabled:opacity-40"
+                    >
+                      {claimSaving ? 'Saving...' : claimOwner ? 'Unclaim' : 'Claim'}
+                    </button>
+                  )}
                 </>
-              )}
-              {templates.some((t) => t.sid === DOCUMENT_TEMPLATE_SID) && (
-                <Badge variant="outline" className="text-[9px] mr-2">Template ready</Badge>
               )}
               {twilioSuspended ? (
                 <Badge variant="warning" className="text-[9px] mr-2">Suspended</Badge>
@@ -816,10 +1082,101 @@ export default function TwilioMessagingPage() {
               </div>
             )}
             <div className="flex items-end gap-2 w-full">
-              <button onClick={() => fileInputRef.current?.click()} disabled={!firebaseEnabled || twilioSuspended} className="p-2.5 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-all disabled:opacity-30 flex-shrink-0" title="Attach file">
-                <Paperclip className="w-5 h-5" />
-              </button>
+              {!templateMode && (
+                <button onClick={() => fileInputRef.current?.click()} disabled={!firebaseEnabled || twilioSuspended} className="p-2.5 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-all disabled:opacity-30 flex-shrink-0" title="Attach file">
+                  <Paperclip className="w-5 h-5" />
+                </button>
+              )}
               <div className="flex-1 relative">
+                {templateMode ? (
+                  <div className="space-y-2">
+                    {templateOnly ? (
+                      <p className="text-[10px] text-amber-300">
+                        {lastInbound || (activeLead && field(activeLead, 'Replied_at'))
+                          ? 'Their last message was more than 24 hours ago, so WhatsApp only allows an approved template.'
+                          : 'WhatsApp only allows an approved template to start a chat.'}
+                      </p>
+                    ) : (
+                      <p className="flex items-center justify-between text-[10px] text-zinc-400">
+                        Send an approved template, with its buttons.
+                        <button type="button" onClick={() => setForceTemplate(false)} className="text-sky-400 hover:underline">
+                          Type a message instead
+                        </button>
+                      </p>
+                    )}
+                    {templateOptions.suggested.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] text-zinc-500">Suggested next:</span>
+                        {templateOptions.suggested.map((t) => (
+                          <button
+                            key={t.sid}
+                            type="button"
+                            onClick={() => selectTemplate(t.sid)}
+                            className={`rounded-md border px-2 py-0.5 text-[10px] ${
+                              templateSid === t.sid
+                                ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-200'
+                                : 'border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10'
+                            }`}
+                          >
+                            {templateLabel(t)}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <Select value={templateSid} onChange={(e) => selectTemplate(e.target.value)} disabled={twilioSuspended} className="h-9 text-xs">
+                      <option value="">{templateOptions.offered.length ? 'Choose a template…' : 'No approved templates loaded'}</option>
+                      {templateOptions.suggested.length > 0 && (
+                        <optgroup label="Suggested next">{templateOptions.suggested.map((t) => templateOption(t))}</optgroup>
+                      )}
+                      {groupTemplates(templateOptions.rest).map(([group, items]) => (
+                        <optgroup key={group} label={group}>
+                          {items.map((t) => templateOption(t))}
+                        </optgroup>
+                      ))}
+                      {templateOptions.sent.length > 0 && (
+                        <optgroup label="Already sent">{templateOptions.sent.map((t) => templateOption(t, ' · sent'))}</optgroup>
+                      )}
+                    </Select>
+                    {selectedTemplate && (
+                      <>
+                        {(selectedTemplate.variableKeys || []).map((key) => (
+                          <Input
+                            key={key}
+                            value={templateVars[key] || ''}
+                            onChange={(e) => setTemplateVars({ ...templateVars, [key]: e.target.value })}
+                            placeholder={`Value for {{${key}}}`}
+                            className="h-8 text-xs"
+                          />
+                        ))}
+                        <p className="max-h-28 overflow-auto whitespace-pre-wrap rounded-md border border-zinc-800 bg-zinc-900/60 p-2 text-[11px] text-zinc-400">
+                          {fillTemplate(selectedTemplate.body || '', templateVars)}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                <>
+                {!twilioSuspended && (
+                  <div className="mb-2 flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setForceTemplate(true)}
+                      className="rounded-md border border-emerald-500/40 px-2 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10"
+                    >
+                      Send a template
+                    </button>
+                    {cannedReplies.map((reply) => (
+                      <button
+                        key={reply.label}
+                        type="button"
+                        onClick={() => setComposerText(reply.text)}
+                        className="rounded-md border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:text-zinc-200"
+                      >
+                        {reply.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {attachmentFile && (
                   <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-zinc-700/60 bg-zinc-900/80 p-2.5">
                     <div className="flex items-center gap-2.5 min-w-0">
@@ -847,6 +1204,8 @@ export default function TwilioMessagingPage() {
                   className="w-full min-h-[42px] max-h-[120px] py-2.5 px-4 bg-zinc-800/80 border border-zinc-700/50 rounded-lg text-[13px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 resize-none disabled:opacity-50"
                   rows={1}
                 />
+                </>
+                )}
               </div>
               <button disabled={!canSend} onClick={() => void onSend()} className={`p-2.5 rounded-lg transition-all flex-shrink-0 ${canSend ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-zinc-800 text-zinc-600'}`} title="Send">
                 {sending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}

@@ -2,9 +2,17 @@ import React from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import LessonBuilderPage from './pages/LessonBuilderPage';
 import SalesFunnelPage from './pages/SalesFunnelPage';
+import SalesHomePage from './pages/SalesHomePage';
+import PipelinePage from './pages/PipelinePage';
 import TwilioMessagingPage from './pages/TwilioMessagingPage';
 import OpsDashboardPage from './pages/OpsDashboardPage';
 import LeadTimelinePage from './pages/LeadTimelinePage';
+import SocialAdsPage from './pages/SocialAdsPage';
+import AdminPage from './pages/AdminPage';
+import SchoolPage from './pages/SchoolPage';
+import TeamPage from './pages/TeamPage';
+import CustomersPage from './pages/CustomersPage';
+import GuidePage from './pages/GuidePage';
 import LoginPage from './pages/LoginPage';
 import { AuthProvider } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -46,6 +54,26 @@ const App: React.FC = () => {
           }
         />
         <Route
+          path="/sales"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <SalesHomePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/pipeline"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <PipelinePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="/sales-funnel"
           element={
             <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
@@ -58,9 +86,69 @@ const App: React.FC = () => {
         <Route
           path="/twilio-messaging"
           element={
-            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'whatsapp_manager']}>
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson', 'whatsapp_manager']}>
               <AppLayout>
                 <TwilioMessagingPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/social"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate']}>
+              <AppLayout>
+                <SocialAdsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/schools/:orgKey"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <SchoolPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/customers"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <CustomersPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/team"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <TeamPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin']}>
+              <AppLayout>
+                <AdminPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/guide"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson', 'whatsapp_manager', 'builder']}>
+              <AppLayout>
+                <GuidePage />
               </AppLayout>
             </ProtectedRoute>
           }
