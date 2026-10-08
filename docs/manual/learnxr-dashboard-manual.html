@@ -99,6 +99,7 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-
       <li><a href="#pipeline">Pipeline</a></li>
       <li><a href="#school">School page</a></li>
       <li><a href="#messaging">Messaging</a></li>
+      <li><a href="#templates">WhatsApp templates</a></li>
       <li><a href="#campaigns">Campaigns</a></li>
       <li class="group">Managing</li>
       <li><a href="#team">Team</a></li>
@@ -249,13 +250,68 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-
       <div class="note warn"><b class="lbl">The 24-hour rule</b>WhatsApp lets you type freely only within <strong>24 hours of the school's last message</strong>. After that, the text box becomes <span class="ui">Choose a template…</span> and you can only send an approved template. Send the template first; once they reply, you can type freely again.</div>
       <p>Schools that reply STOP are blocked from further messages automatically.</p>
       <h3>Templates</h3>
-      <p>The template list is grouped into <strong>Channel partner</strong>, <strong>School</strong> and <strong>Other</strong>, each in English and हिंदी. Every one has a <span class="ui">Call us</span> button. Picking a template fills <code>{{1}}</code> with the contact's first name and <code>{{2}}</code> with yours; type <code>{{3}}</code> (a link, date or partner ID) yourself.</p>
-      <ul>
-        <li><strong>Reseller leads, first message:</strong> <em>partner form</em> (link to the partner sign-up page) or <em>partner book call</em> (link to book a one-to-one slot). Both say you will call them.</li>
-        <li><strong>After the partner call</strong>, one step at a time: <em>step1 welcome</em> → <em>step2 product kit</em> → <em>step3 commercials</em> → <em>step4 agreement KYC</em> → <em>step5 pitch kit</em> → <em>step6 live</em>.</li>
-        <li><strong>After a school demo</strong>: <em>step1 demo recap</em> → <em>step2 proposal</em> → <em>step3 setup checklist</em> → <em>step4 teacher training</em> → <em>step5 go live</em>.</li>
-        <li><strong>School replies</strong> (<em>reply positive, demo, pricing, neutral, negative</em>) answer a school's message and say someone will call them.</li>
-      </ul>
+      <p>Pick a template from <span class="ui">Choose a template…</span>. The list is grouped into <strong>Channel partner</strong>, <strong>School</strong> and <strong>Other</strong>, each in English and हिंदी. Which one to send when is in <a href="#templates">WhatsApp templates</a>.</p>
+    </section>
+
+    <section id="templates">
+      <h2>WhatsApp templates</h2>
+      <p class="who">For anyone who messages leads. Which template to send, when, and what to type.</p>
+      <h3>How to send one</h3>
+      <ol>
+        <li>Open the lead and press <span class="ui">WhatsApp</span>, or open the chat in <a href="#messaging">Messaging</a>.</li>
+        <li>Pick the template from <span class="ui">Choose a template…</span>. Use the <strong>हिंदी</strong> version if the contact writes or speaks in Hindi, otherwise <strong>EN</strong>.</li>
+        <li>Check the boxes. <code>{{1}}</code> (their first name) and <code>{{2}}</code> (your first name) are filled for you. Type <code>{{3}}</code> yourself where the template needs it (see the tables).</li>
+        <li>Read the preview, then send.</li>
+      </ol>
+      <p>Every template has a <span class="ui">Call us</span> button that rings +91 86199 53434. Templates show in the list only after WhatsApp approves them, so a few onboarding steps may appear later.</p>
+
+      <h3>Channel partners (resellers)</h3>
+      <p>Partners are resellers, not school owners. Send one step at a time, and only after the previous step is done.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>When</th><th>Template</th><th>Type in {{3}}</th><th>Button</th></tr></thead>
+          <tbody>
+            <tr><td>A reseller lead comes in from the ad or the website and you haven't spoken yet</td><td><em>partner form</em></td><td>Nothing</td><td>Fill partner form</td></tr>
+            <tr><td>They want to talk first, or the form is already filled</td><td><em>partner book call</em></td><td>Nothing</td><td>Book a slot (Calendly)</td></tr>
+            <tr><td>Right after your first call</td><td><em>step1 welcome</em>: the five steps ahead</td><td>Nothing</td><td>Call us</td></tr>
+            <tr><td>They are ready to learn the product</td><td><em>step2 product kit</em></td><td>Link to the product and demo kit</td><td>Call us</td></tr>
+            <tr><td>They have seen the product and asked about money</td><td><em>step3 commercials</em></td><td>Link to the price and margin sheet</td><td>Call us</td></tr>
+            <tr><td>They agree to the terms</td><td><em>step4 agreement KYC</em>: asks for GST, PAN, address proof and bank details</td><td>Link to the partner agreement</td><td>Call us</td></tr>
+            <tr><td>Documents are verified</td><td><em>step5 pitch kit</em></td><td>Link to the brochure, deck and FAQs</td><td>Book a joint demo</td></tr>
+            <tr><td>Agreement signed, partner set up</td><td><em>step6 live</em></td><td>Their partner ID</td><td>Call us</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Schools after a demo</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>When</th><th>Template</th><th>Type in {{3}}</th></tr></thead>
+          <tbody>
+            <tr><td>Same day as the demo</td><td><em>step1 demo recap</em></td><td>Nothing</td></tr>
+            <tr><td>The proposal is ready</td><td><em>step2 proposal</em></td><td>Link to the proposal</td></tr>
+            <tr><td>The school confirms the order</td><td><em>step3 setup checklist</em>: room, power, Wi-Fi, coordinator</td><td>Nothing</td></tr>
+            <tr><td>Training date fixed</td><td><em>step4 teacher training</em></td><td>The date and time, e.g. 15 Oct, 11 am</td></tr>
+            <tr><td>Headsets installed and teachers trained</td><td><em>step5 go live</em></td><td>Nothing</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Answering a school that wrote back</h3>
+      <p>Use these when a school replied but it has been more than 24 hours, so you can't type freely. Each one says someone from our team will call them, so call them soon after.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>They said</th><th>Template</th><th>Button</th></tr></thead>
+          <tbody>
+            <tr><td>Sounds interesting, tell me more</td><td><em>reply positive</em></td><td>Book now</td></tr>
+            <tr><td>Can we see a demo?</td><td><em>reply demo</em></td><td>Book now</td></tr>
+            <tr><td>What does it cost?</td><td><em>reply pricing</em></td><td>Book now</td></tr>
+            <tr><td>Maybe later, or no clear answer</td><td><em>reply neutral</em></td><td>Try the free app</td></tr>
+            <tr><td>Not interested</td><td><em>reply negative</em></td><td>Explore the app</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Templates under <strong>Other</strong> are older ones. Prefer the ones above, which include the call line and button.</p>
     </section>
 
     <section id="campaigns">
