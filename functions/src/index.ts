@@ -37,6 +37,8 @@ import {
 } from "./customers";
 import { CALL_OUTCOMES, leaderboard, slaAlert, slaBreaches, weeklyDigest } from "./team";
 import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefaults, type AppSettings } from "./settings";
+import { PRICING_DOC, agentPricingText, cleanPricing, pricingSheetRows, withPricingDefaults } from "./pricing";
+import { VOICE_CALLS, voiceCallFromExecution, voiceTotals, type VoiceCall } from "./voice";
 
 setGlobalOptions({ maxInstances: 10 });
 
@@ -67,6 +69,8 @@ const metaSystemTokenSecret = defineSecret("META_SYSTEM_TOKEN");
 const metaAppSecret = defineSecret("META_APP_SECRET");
 /** The token typed into the Meta app's webhook setup; Meta echoes it on the verify call. */
 const metaVerifyTokenSecret = defineSecret("META_VERIFY_TOKEN");
+/** Bolna (AI calling) API key, for playing call recordings; "unset" until the account exists. */
+const bolnaApiKeySecret = defineSecret("BOLNA_API_KEY");
 
 const AUTH_FIREBASE_PROJECT_ID =
   process.env.AUTH_FIREBASE_PROJECT_ID || "learnxr-evoneuralai";
@@ -2930,6 +2934,184 @@ app.get("/api/internal/settings", async (req, res) => {
   return res.json(await loadSettings());
 });
 
+// ---- Pricing (/pricing page, the "Pricing" sheet tab, the calling agent) ----
+
+async function loadPricing() {
+  const doc = await getDataProjectDb().doc(PRICING_DOC).get();
+  return withPricingDefaults(doc.exists ? doc.data() : null);
+}
+
+app.get("/api/pricing", requireRoles(OPS_ROLES), async (_req, res) => {
+  return res.json(await loadPricing());
+});
+
+app.put("/api/pricing", requireRoles(ADMIN_ROLES), async (req, res) => {
+  const cleaned = cleanPricing(req.body);
+  if (typeof cleaned === "string") return res.status(400).json({ message: cleaned });
+  const auth = getAuthedUser(req);
+  const next = { ...cleaned, updatedAt: new Date().toISOString(), updatedBy: auth?.email || null };
+  await getDataProjectDb().doc(PRICING_DOC).set(next);
+  await writeOpsAudit({
+    action: "pricing.update",
+    auth,
+    targetId: "pricing",
+    details: { plans: next.plans.length, margins: next.partnerMargins.length, competitors: next.competitors.length },
+  });
+  // The sheet copy refreshes daily anyway, so a failed nudge only delays it.
+  void callN8nWebhook("pricing-sheet-sync", { method: "POST", body: {}, timeoutMs: 10_000 }).catch((err) =>
+    logger.warn("pricing sheet sync nudge failed", err)
+  );
+  return res.json(withPricingDefaults(next));
+});
+
+/** n8n and the calling agent read pricing here (X-Altie-Key): the full document, sheet rows and the agent's lines. */
+app.get("/api/internal/pricing", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const pricing = await loadPricing();
+  return res.json({ pricing, sheetRows: pricingSheetRows(pricing), agentText: agentPricingText(pricing) });
+});
+
+// ---- AI calls (Sales • Voice Agent → Bolna) ----
+
+/** Start of the current month and day in IST, as ISO strings, for usage counts. */
+function istPeriodStarts(now = Date.now()) {
+  const ist = new Date(now + 5.5 * 3_600_000);
+  const day = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate()) - 5.5 * 3_600_000;
+  const month = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), 1) - 5.5 * 3_600_000;
+  return { dayIso: new Date(day).toISOString(), monthIso: new Date(month).toISOString() };
+}
+
+async function voiceCallsSince(iso: string): Promise<VoiceCall[]> {
+  const snap = await getDataProjectDb().collection(VOICE_CALLS).where("createdAt", ">=", iso).limit(2000).get();
+  return snap.docs.map((d) => d.data() as VoiceCall);
+}
+
+/**
+ * n8n posts every Bolna delivery for a call here (X-Altie-Key). The record is upserted; the first final delivery
+ * also adds a "lead.ai_call" entry to the lead's activity.
+ */
+app.post("/api/internal/voice-calls", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const body = (req.body || {}) as Record<string, unknown>;
+  const call = voiceCallFromExecution(body.execution, { leadId: body.leadId, orgName: body.orgName, audience: body.audience });
+  if (typeof call === "string") return res.status(400).json({ message: call });
+  if (!LEAD_ID_PATTERN.test(call.leadId)) return res.status(400).json({ message: "Invalid leadId." });
+  const ref = getDataProjectDb().collection(VOICE_CALLS).doc(call.id);
+  const prev = await ref.get();
+  const logged = prev.exists && prev.data()?.loggedAt;
+  await ref.set({ ...call, createdAt: prev.exists ? prev.data()?.createdAt || call.createdAt : call.createdAt }, { merge: true });
+  if (call.terminal && !logged) {
+    await writeOpsAudit({
+      action: "lead.ai_call",
+      targetId: call.leadId,
+      details: { callId: call.id, outcome: call.outcome, interest: call.interest, seconds: call.seconds, summary: call.summary },
+    });
+    await ref.set({ loggedAt: new Date().toISOString() }, { merge: true });
+  }
+  return res.json({ ok: true, outcome: call.outcome, terminal: call.terminal, firstFinal: call.terminal && !logged });
+});
+
+/** What n8n's gate needs: calls started today and minutes used this month (IST). */
+app.get("/api/internal/voice-usage", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const { dayIso, monthIso } = istPeriodStarts();
+  const month = await voiceCallsSince(monthIso);
+  const totals = voiceTotals(month);
+  return res.json({ callsToday: month.filter((c) => c.createdAt >= dayIso).length, minutesThisMonth: totals.minutes });
+});
+
+app.get("/api/voice/calls", requireRoles(SALES_N8N_ROLES), async (_req, res) => {
+  const { monthIso } = istPeriodStarts();
+  const [recent, month] = await Promise.all([
+    getDataProjectDb().collection(VOICE_CALLS).orderBy("createdAt", "desc").limit(100).get(),
+    voiceCallsSince(monthIso),
+  ]);
+  const calls = recent.docs.map((d) => d.data() as VoiceCall);
+  return res.json({ calls, month: voiceTotals(month), settings: await loadSettings() });
+});
+
+/** Streams a call recording with our Bolna key, so the browser never sees it. */
+app.get("/api/voice/calls/:id/recording", requireRoles(SALES_N8N_ROLES), async (req, res) => {
+  const id = safeText(req.params.id);
+  if (!/^[\w-]{8,80}$/.test(id)) return res.status(400).json({ message: "Invalid call id." });
+  const key = bolnaApiKeySecret.value();
+  if (!key || key === "unset") return res.status(503).json({ message: "AI calling isn't connected yet." });
+  try {
+    const exec = await fetch(`https://api.bolna.ai/executions/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!exec.ok) return res.status(exec.status === 404 ? 404 : 502).json({ message: "Recording not found." });
+    const url = String(((await exec.json()) as any)?.telephony_data?.recording_url || "");
+    if (!/^https:\/\//.test(url)) return res.status(404).json({ message: "No recording for this call." });
+    const audio = await fetch(url, {
+      headers: url.startsWith("https://api.bolna.ai/") ? { Authorization: `Bearer ${key}` } : {},
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!audio.ok || !audio.body) return res.status(502).json({ message: "Recording unavailable." });
+    res.setHeader("Content-Type", audio.headers.get("content-type") || "audio/mpeg");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    return res.send(Buffer.from(await audio.arrayBuffer()));
+  } catch (err) {
+    logger.error("recording fetch failed", err);
+    return res.status(502).json({ message: "Recording unavailable." });
+  }
+});
+
+/**
+ * n8n sends an approved LearnXR template (lxr_* only) during or after an AI call (X-Altie-Key). Numbers that replied
+ * STOP stay blocked. Variables: {{1}} first name, {{2}} sender name, {{3}} link/date when the template needs it.
+ */
+app.post("/api/internal/whatsapp-template", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const t = getTwilioConfig();
+  if (!t.ok) return res.status(503).json({ message: "Twilio is not configured." });
+  const to = leadKeyFromPhone(req.body?.to);
+  const name = safeText(req.body?.templateName);
+  if (!isValidWhatsAppRecipient(to)) return res.status(400).json({ message: "Invalid recipient." });
+  if (!/^lxr_[a-z0-9_]+_(en|hi)$/.test(name)) return res.status(400).json({ message: "Only lxr_* templates can be sent this way." });
+  const optOut = await getDataProjectDb().collection(WHATSAPP_OPT_OUTS_COLLECTION).doc(to).get();
+  if (optOut.exists) return res.status(409).json({ message: "This number replied STOP." });
+  const template = (await listApprovedTemplates(t)).find((x) => x.name === name);
+  if (!template) return res.status(404).json({ message: `Template ${name} isn't approved.` });
+  const given = (req.body?.variables && typeof req.body.variables === "object" ? req.body.variables : {}) as Record<string, unknown>;
+  const keys = (template.variableKeys as string[]) || [];
+  const variables = Object.fromEntries(keys.map((k) => [k, safeText(given[k]).slice(0, 200) || (k === "2" ? "LearnXR team" : "there")]));
+  const params = new URLSearchParams({ To: `whatsapp:${to}`, ContentSid: String(template.sid) });
+  if (keys.length) params.set("ContentVariables", JSON.stringify(variables));
+  if (t.messagingServiceSid) params.set("MessagingServiceSid", t.messagingServiceSid);
+  else params.set("From", t.whatsappFrom.startsWith("whatsapp:") ? t.whatsappFrom : `whatsapp:${t.whatsappFrom}`);
+  const apiRes = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(t.accountSid)}/Messages.json`, {
+    method: "POST",
+    headers: { Authorization: twilioBasicAuthHeader(t.accountSid, t.authToken), "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+  });
+  const data = (await apiRes.json().catch(() => ({}))) as Record<string, unknown>;
+  await writeOpsAudit({ action: "whatsapp.template.auto", targetId: to, details: { name, status: apiRes.status, sid: data.sid || null } });
+  if (!apiRes.ok) return res.status(502).json({ message: String(data.message || "Twilio send failed") });
+  return res.json({ ok: true, sid: data.sid });
+});
+
+/** "Call now" from the dashboard. n8n's gate still decides (consent, hours, caps, mode). */
+app.post("/api/voice/call-now", requireRoles(SALES_N8N_ROLES), async (req, res) => {
+  const auth = getAuthedUser(req);
+  const leadId = safeText(req.body?.leadId);
+  if (!LEAD_ID_PATTERN.test(leadId)) return res.status(400).json({ message: "Invalid lead id." });
+  try {
+    const { status, data } = await callN8nWebhook("voice-call-now", {
+      method: "POST",
+      body: { leadId, requestedBy: auth?.email || null },
+      timeoutMs: 20_000,
+    });
+    await writeOpsAudit({ action: "voice.call_now", auth, targetId: leadId, details: { status } });
+    if (status >= 400) return res.status(502).json({ message: "The calling workflow didn't answer." });
+    return res.json(data && typeof data === "object" ? data : { ok: true });
+  } catch (err) {
+    logger.error("call-now failed", err);
+    return res.status(502).json({ message: "The calling workflow didn't answer." });
+  }
+});
+
 /** The workflows the Admin page watches. */
 const HEALTH_WORKFLOWS = [
   { id: SALES_FUNNEL_WORKFLOW_ID, name: "Sales • Outbound", role: "City runs, first emails, daily follow-ups" },
@@ -3313,6 +3495,7 @@ export const api = onRequest(
       metaSystemTokenSecret,
       metaAppSecret,
       metaVerifyTokenSecret,
+      bolnaApiKeySecret,
     ],
   },
   app

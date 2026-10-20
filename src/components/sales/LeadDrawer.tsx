@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarCheck, CalendarX, Copy, Loader2, MessageCircle, Phone, X } from 'lucide-react';
+import { Bot, CalendarCheck, CalendarX, Copy, Loader2, MessageCircle, Phone, X } from 'lucide-react';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -8,7 +8,7 @@ import { Label } from '../ui/label';
 import { Select } from '../ui/select';
 import { Textarea } from '../ui/textarea';
 import { useAuth } from '../../context/AuthContext';
-import { CALL_OUTCOMES, fetchLeadActivity, type CallOutcome, type LeadActivityItem } from '../../api/opsClient';
+import { CALL_OUTCOMES, fetchLeadActivity, requestAiCall, type CallOutcome, type LeadActivityItem } from '../../api/opsClient';
 import { useAppSettings } from '../../lib/useAppSettings';
 import { leadPhoneForMessaging, type SchoolLeadRow } from '../../api/sheetsClient';
 import {
@@ -78,6 +78,12 @@ function describeActivity(item: LeadActivityItem): string | null {
   if (item.action === 'lead.call') {
     return `Call: ${String(item.details.outcome || '')}${item.details.notes ? ` — ${String(item.details.notes)}` : ''}`;
   }
+  if (item.action === 'lead.ai_call') {
+    const d = item.details;
+    const outcome = String(d.outcome || '').replace(/_/g, ' ');
+    return `AI call: ${outcome}${d.interest ? ` (${String(d.interest)}/5)` : ''}${d.summary ? ` — ${String(d.summary)}` : ''}`;
+  }
+  if (item.action === 'voice.call_now') return 'Asked the AI agent to call';
   if (item.action !== 'lead.update') return item.action;
   const fields = (item.details.fields || {}) as Record<string, string>;
   if ('First_touch_at' in fields && Object.keys(fields).length === 1) return null;
@@ -275,6 +281,20 @@ export function LeadDrawer({ lead, onClose, onChange }: Props) {
               >
                 <MessageCircle className="h-3.5 w-3.5" /> WhatsApp
               </Link>
+            )}
+            {phone && leadId && (
+              <Button
+                size="sm"
+                variant="outline"
+                title="The AI agent calls only if this lead enquired in the last 7 days or asked for a callback, inside calling hours."
+                onClick={() =>
+                  void requestAiCall(leadId)
+                    .then((r) => setInfo(r.reason ? `AI call not placed: ${r.reason}` : 'AI call started'))
+                    .catch((e) => setInfo(e instanceof Error ? e.message : 'Could not start the AI call'))
+                }
+              >
+                <Bot className="h-3.5 w-3.5" /> AI call
+              </Button>
             )}
             {leadId && (
               <Button

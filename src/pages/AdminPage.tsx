@@ -55,6 +55,7 @@ export default function AdminPage() {
   const [saved, setSaved] = useState<AppSettings | null>(null);
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [recipients, setRecipients] = useState('');
+  const [testNumbers, setTestNumbers] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
 
@@ -77,6 +78,7 @@ export default function AdminPage() {
         setSaved(s);
         setDraft(s);
         setRecipients(s.alertRecipients.join(', '));
+        setTestNumbers(s.voiceTestNumbers.join(', '));
       })
       .catch((e) => setMessage({ text: e instanceof Error ? e.message : 'Could not load settings.', ok: false }));
   }, [loadHealth]);
@@ -85,17 +87,22 @@ export default function AdminPage() {
 
   const save = async () => {
     if (!draft || !saved) return;
-    const next = { ...draft, alertRecipients: recipients.split(',').map((e) => e.trim()).filter(Boolean) };
+    const next = {
+      ...draft,
+      alertRecipients: recipients.split(',').map((e) => e.trim()).filter(Boolean),
+      voiceTestNumbers: testNumbers.split(',').map((n) => n.replace(/[\s-]/g, '')).filter(Boolean),
+    };
     const patch: Partial<AppSettings> = {};
     for (const key of Object.keys(next) as Array<keyof AppSettings>) {
       if (JSON.stringify(next[key]) !== JSON.stringify(saved[key])) (patch as Record<string, unknown>)[key] = next[key];
     }
     if (!Object.keys(patch).length) return setMessage({ text: 'Nothing changed.', ok: true });
-    const goingLive = (['autoActionsMode', 'welcomeMode'] as const).filter((k) => patch[k] === 'live');
+    const LIVE_LABELS = { welcomeMode: 'WhatsApp welcome', autoActionsMode: 'automatic WhatsApp replies', voiceMode: 'AI calls' } as const;
+    const goingLive = (['autoActionsMode', 'welcomeMode', 'voiceMode'] as const).filter((k) => patch[k] === 'live');
     if (
       goingLive.length &&
       !window.confirm(
-        `Switch ${goingLive.map((k) => (k === 'welcomeMode' ? 'WhatsApp welcome' : 'automatic WhatsApp replies')).join(' and ')} to LIVE? Real schools will receive messages.`
+        `Switch ${goingLive.map((k) => LIVE_LABELS[k]).join(' and ')} to LIVE? Real schools and partners will be messaged or called.`
       )
     ) {
       return;
@@ -107,6 +114,7 @@ export default function AdminPage() {
       setSaved(result);
       setDraft(result);
       setRecipients(result.alertRecipients.join(', '));
+      setTestNumbers(result.voiceTestNumbers.join(', '));
       forgetAppSettings();
       setMessage({ text: `Saved ${Object.keys(patch).length} setting(s).`, ok: true });
     } catch (e) {
@@ -256,6 +264,41 @@ export default function AdminPage() {
               <Field label="Alert recipients" hint="Comma-separated emails for hot-lead and failure alerts.">
                 <Input value={recipients} onChange={(e) => setRecipients(e.target.value)} />
               </Field>
+
+              <h3 className="pt-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">AI calls</h3>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="AI calling" hint="Live calls only opted-in leads, within 7 days of their enquiry.">
+                  <select className={selectClass} value={draft.voiceMode} onChange={(e) => set('voiceMode', e.target.value as AppSettings['voiceMode'])}>
+                    <option value="off">Off</option>
+                    <option value="test">Test (test numbers only)</option>
+                    <option value="live">Live</option>
+                  </select>
+                </Field>
+                <Field label="Calling hours (IST, Mon–Sat)" hint="TRAI allows 9 to 21 at most.">
+                  <div className="flex items-center gap-1.5">
+                    <Input type="number" min={9} max={20} value={draft.voiceHours.start} onChange={(e) => set('voiceHours', { ...draft.voiceHours, start: Number(e.target.value) })} />
+                    <span className="text-[10px] text-zinc-500">to</span>
+                    <Input type="number" min={10} max={21} value={draft.voiceHours.end} onChange={(e) => set('voiceHours', { ...draft.voiceHours, end: Number(e.target.value) })} />
+                  </div>
+                </Field>
+                <Field label="AI calls per day" hint="Retries included.">
+                  <Input type="number" min={0} max={200} value={draft.voiceDailyCallCap} onChange={(e) => set('voiceDailyCallCap', Number(e.target.value))} />
+                </Field>
+                <Field label="Call minutes per month" hint="Calls stop when used up (≈ ₹6/min).">
+                  <Input type="number" min={0} max={20000} value={draft.voiceMonthlyMinuteBudget} onChange={(e) => set('voiceMonthlyMinuteBudget', Number(e.target.value))} />
+                </Field>
+              </div>
+              <Field label="Test numbers" hint="Comma-separated, +91XXXXXXXXXX. In test mode the agent calls only these.">
+                <Input value={testNumbers} onChange={(e) => setTestNumbers(e.target.value)} placeholder="+91XXXXXXXXXX" />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="School agent id (Bolna)">
+                  <Input value={draft.voiceAgents.school} onChange={(e) => set('voiceAgents', { ...draft.voiceAgents, school: e.target.value.trim() })} />
+                </Field>
+                <Field label="Partner agent id (Bolna)">
+                  <Input value={draft.voiceAgents.partner} onChange={(e) => set('voiceAgents', { ...draft.voiceAgents, partner: e.target.value.trim() })} />
+                </Field>
+              </div>
             </div>
 
             <div className="space-y-3 lg:col-span-2">

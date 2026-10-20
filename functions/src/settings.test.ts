@@ -88,3 +88,20 @@ describe('summarizeRuns', () => {
     expect(summarizeRuns([])).toMatchObject({ lastRunAt: null, runs24h: 0, errors24h: 0 });
   });
 });
+
+describe('voice settings', () => {
+  it('defaults to off with safe caps', () => {
+    expect(withDefaults({})).toMatchObject({ voiceMode: 'off', voiceDailyCallCap: 30, voiceHours: { start: 10, end: 18 } });
+  });
+
+  it('validates mode, numbers, hours and agent ids', () => {
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { voiceMode: 'test' })).toMatch(/at least one test number/);
+    const ok = applySettingsPatch(DEFAULT_SETTINGS, { voiceMode: 'test', voiceTestNumbers: ['+91 86199 53434'] });
+    expect(typeof ok !== 'string' && ok.voiceTestNumbers).toEqual(['+918619953434']);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { voiceTestNumbers: ['8619953434'] })).toMatch(/\+91/);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { voiceHours: { start: 8, end: 18 } })).toMatch(/between 9 and 21/);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { voiceAgents: { school: 'abc', partner: '' } })).toMatch(/UUID/);
+    expect(applySettingsPatch(DEFAULT_SETTINGS, { voiceDailyCallCap: 500 })).toMatch(/between 0 and 200/);
+    expect(withDefaults({ voiceMode: 'on', voiceHours: { start: 2, end: 23 } })).toMatchObject({ voiceMode: 'off', voiceHours: { start: 10, end: 18 } });
+  });
+});

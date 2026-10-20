@@ -340,6 +340,12 @@ export type AppSettings = {
   metaMaxDailyBudgetInr: number;
   alertRecipients: string[];
   replyTemplates: Array<{ title: string; body: string }>;
+  voiceMode: 'off' | 'test' | 'live';
+  voiceDailyCallCap: number;
+  voiceMonthlyMinuteBudget: number;
+  voiceHours: { start: number; end: number };
+  voiceTestNumbers: string[];
+  voiceAgents: { school: string; partner: string };
 };
 
 export type WorkflowHealth = {
@@ -480,4 +486,102 @@ export async function linkCustomer(orgKey: string, change: { productSchoolId?: s
     body: JSON.stringify(change),
   });
   if (!res.ok) await parseError(res, 'Could not save the link.');
+}
+
+// ---- Pricing (/pricing) ----
+
+/** Mirrors Pricing in functions/src/pricing.ts. */
+export type PricePlan = {
+  id: string;
+  name: string;
+  includes: string;
+  priceInr: number;
+  priceMaxInr: number;
+  unit: string;
+  notes: string;
+  agentCanShare: boolean;
+};
+
+export type Pricing = {
+  gstPercent: number;
+  plans: PricePlan[];
+  partnerMargins: Array<{ label: string; percent: number; notes: string }>;
+  competitors: Array<{ name: string; offer: string; price: string; source: string; asOf: string }>;
+  updatedAt: string | null;
+  updatedBy: string | null;
+};
+
+export async function fetchPricing(): Promise<Pricing> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/pricing'));
+  if (!res.ok) await parseError(res, 'Could not load pricing.');
+  return res.json();
+}
+
+export async function savePricing(pricing: Omit<Pricing, 'updatedAt' | 'updatedBy'>): Promise<Pricing> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/pricing'), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(pricing),
+  });
+  if (!res.ok) await parseError(res, 'Could not save pricing.');
+  return res.json();
+}
+
+// ---- AI calls (/calls) ----
+
+/** Mirrors VoiceCall in functions/src/voice.ts. */
+export type VoiceCall = {
+  id: string;
+  leadId: string;
+  orgName: string;
+  audience: 'school' | 'partner';
+  toLast4: string;
+  status: string;
+  terminal: boolean;
+  outcome: 'demo_booked' | 'interested' | 'callback' | 'not_interested' | 'wrong_person' | 'opted_out' | 'no_conversation';
+  interest: number | null;
+  summary: string;
+  extracted: Record<string, unknown>;
+  transcript: string;
+  seconds: number;
+  costInr: number | null;
+  voice: string;
+  hangupReason: string;
+  hasRecording: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VoiceTotals = {
+  calls: number;
+  conversations: number;
+  demosBooked: number;
+  optedOut: number;
+  minutes: number;
+  costInr: number;
+  byVoice: Record<string, { calls: number; conversations: number; demosBooked: number }>;
+};
+
+export async function fetchVoiceCalls(): Promise<{ calls: VoiceCall[]; month: VoiceTotals; settings: AppSettings }> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/voice/calls'));
+  if (!res.ok) await parseError(res, 'Could not load AI calls.');
+  return res.json();
+}
+
+/** An object URL for a call recording (fetched with auth, so it can't be a plain link). */
+export async function fetchVoiceRecording(callId: string): Promise<string> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/voice/calls/${encodeURIComponent(callId)}/recording`));
+  if (!res.ok) await parseError(res, 'Recording unavailable.');
+  return URL.createObjectURL(await res.blob());
+}
+
+/** Asks the calling workflow to call this lead now; it still checks consent, hours and caps. */
+export async function requestAiCall(leadId: string): Promise<{ ok?: boolean; queued?: boolean; reason?: string }> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/voice/call-now'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ leadId }),
+  });
+  if (!res.ok) await parseError(res, 'Could not start the call.');
+  return res.json();
 }

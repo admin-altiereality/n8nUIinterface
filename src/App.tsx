@@ -13,6 +13,8 @@ import SchoolPage from './pages/SchoolPage';
 import TeamPage from './pages/TeamPage';
 import CustomersPage from './pages/CustomersPage';
 import GuidePage from './pages/GuidePage';
+import PricingPage from './pages/PricingPage';
+import CallsPage from './pages/CallsPage';
 import LoginPage from './pages/LoginPage';
 import { AuthProvider } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -139,6 +141,26 @@ const App: React.FC = () => {
             <ProtectedRoute allowedRoles={['superadmin']}>
               <AppLayout>
                 <AdminPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/calls"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <CallsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/pricing"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson', 'whatsapp_manager']}>
+              <AppLayout>
+                <PricingPage />
               </AppLayout>
             </ProtectedRoute>
           }

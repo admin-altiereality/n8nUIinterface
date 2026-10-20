@@ -11,6 +11,9 @@ export type LeadSourceKey = (typeof LEAD_SOURCES)[number];
 
 export type Mode = "test" | "live";
 
+/** AI calling: off, test (only voiceTestNumbers), live (opted-in leads). */
+export type VoiceMode = "off" | "test" | "live";
+
 export type AppSettings = {
   /** ₹ won per month we aim for; 0 hides the target. */
   monthlyTargetInr: number;
@@ -30,6 +33,18 @@ export type AppSettings = {
   alertRecipients: string[];
   /** Canned replies reps can insert in Messaging and the lead drawer. */
   replyTemplates: Array<{ title: string; body: string }>;
+  /** AI calling agent (Sales • Voice Agent in n8n). */
+  voiceMode: VoiceMode;
+  /** AI calls placed per IST day, retries included. */
+  voiceDailyCallCap: number;
+  /** Call minutes per calendar month; calls stop when it's used up. */
+  voiceMonthlyMinuteBudget: number;
+  /** IST hours calls may start, Monday to Saturday; TRAI allows 9 to 21 at most. */
+  voiceHours: { start: number; end: number };
+  /** In test mode, the only numbers the agent may call (E.164). */
+  voiceTestNumbers: string[];
+  /** Bolna agent ids for each audience. */
+  voiceAgents: { school: string; partner: string };
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -42,10 +57,52 @@ export const DEFAULT_SETTINGS: AppSettings = {
   metaMaxDailyBudgetInr: 2000,
   alertRecipients: ["gaurav@altiereality.com"],
   replyTemplates: [],
+  voiceMode: "off",
+  voiceDailyCallCap: 30,
+  voiceMonthlyMinuteBudget: 2000,
+  voiceHours: { start: 10, end: 18 },
+  voiceTestNumbers: [],
+  voiceAgents: { school: "", partner: "" },
 };
 
 /** Hard ceilings so a typo can't, say, send 2,000 cold emails in a day. */
-const LIMITS = { dailyEmailCap: 100, monthlyTargetInr: 100_000_000, spend: 10_000_000, metaMaxDailyBudgetInr: 50_000 };
+const LIMITS = {
+  dailyEmailCap: 100,
+  monthlyTargetInr: 100_000_000,
+  spend: 10_000_000,
+  metaMaxDailyBudgetInr: 50_000,
+  voiceDailyCallCap: 200,
+  voiceMonthlyMinuteBudget: 20_000,
+};
+
+const E164 = /^\+[1-9]\d{7,14}$/;
+const AGENT_ID = /^[0-9a-f-]{36}$/i;
+
+/** Valid E.164 numbers, deduplicated, at most 10; null if any entry is invalid. */
+function cleanNumbers(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const list = value.map((n) => String(n).replace(/[\s-]/g, "")).filter(Boolean);
+  if (list.some((n) => !E164.test(n))) return null;
+  return [...new Set(list)].slice(0, 10);
+}
+
+/** Calling window inside TRAI's 9:00–21:00, at least an hour long; null if invalid. */
+function cleanHours(value: unknown): { start: number; end: number } | null {
+  const v = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const start = Number(v.start);
+  const end = Number(v.end);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 9 || end > 21 || end - start < 1) return null;
+  return { start, end };
+}
+
+/** Bolna agent ids (UUIDs) or empty; null if one is malformed. */
+function cleanAgents(value: unknown): { school: string; partner: string } | null {
+  const v = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const school = String(v.school ?? "").trim();
+  const partner = String(v.partner ?? "").trim();
+  if ((school && !AGENT_ID.test(school)) || (partner && !AGENT_ID.test(partner))) return null;
+  return { school, partner };
+}
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -91,6 +148,13 @@ export function withDefaults(stored: unknown): AppSettings {
         ? s.alertRecipients.map((e: unknown) => String(e).trim().toLowerCase()).filter((e: string) => EMAIL.test(e))
         : DEFAULT_SETTINGS.alertRecipients,
     replyTemplates: cleanTemplates(s.replyTemplates) ?? DEFAULT_SETTINGS.replyTemplates,
+    voiceMode: s.voiceMode === "test" || s.voiceMode === "live" ? s.voiceMode : "off",
+    voiceDailyCallCap: wholeNumber(s.voiceDailyCallCap, LIMITS.voiceDailyCallCap) ?? DEFAULT_SETTINGS.voiceDailyCallCap,
+    voiceMonthlyMinuteBudget:
+      wholeNumber(s.voiceMonthlyMinuteBudget, LIMITS.voiceMonthlyMinuteBudget) ?? DEFAULT_SETTINGS.voiceMonthlyMinuteBudget,
+    voiceHours: cleanHours(s.voiceHours) ?? DEFAULT_SETTINGS.voiceHours,
+    voiceTestNumbers: cleanNumbers(s.voiceTestNumbers) ?? DEFAULT_SETTINGS.voiceTestNumbers,
+    voiceAgents: cleanAgents(s.voiceAgents) ?? DEFAULT_SETTINGS.voiceAgents,
   };
 }
 
@@ -154,11 +218,46 @@ export function applySettingsPatch(current: AppSettings, patch: unknown): AppSet
         next.replyTemplates = list;
         break;
       }
+      case "voiceMode":
+        if (value !== "off" && value !== "test" && value !== "live") return 'voiceMode must be "off", "test" or "live".';
+        next.voiceMode = value;
+        break;
+      case "voiceDailyCallCap": {
+        const v = wholeNumber(value, LIMITS.voiceDailyCallCap);
+        if (v === null) return `Daily AI call cap must be between 0 and ${LIMITS.voiceDailyCallCap}.`;
+        next.voiceDailyCallCap = v;
+        break;
+      }
+      case "voiceMonthlyMinuteBudget": {
+        const v = wholeNumber(value, LIMITS.voiceMonthlyMinuteBudget);
+        if (v === null) return `Monthly call minutes must be between 0 and ${LIMITS.voiceMonthlyMinuteBudget}.`;
+        next.voiceMonthlyMinuteBudget = v;
+        break;
+      }
+      case "voiceHours": {
+        const v = cleanHours(value);
+        if (!v) return "Calling hours must be whole hours between 9 and 21, at least an hour apart.";
+        next.voiceHours = v;
+        break;
+      }
+      case "voiceTestNumbers": {
+        const v = cleanNumbers(value);
+        if (!v) return "Test numbers must be in +91XXXXXXXXXX form.";
+        next.voiceTestNumbers = v;
+        break;
+      }
+      case "voiceAgents": {
+        const v = cleanAgents(value);
+        if (!v) return "Agent ids must be Bolna agent UUIDs.";
+        next.voiceAgents = v;
+        break;
+      }
       default:
         return `Unknown setting "${key}".`;
     }
   }
   if (next.followUpMax > next.dailyEmailCap) return "Follow-up share can't be more than the daily email cap.";
+  if (next.voiceMode === "test" && !next.voiceTestNumbers.length) return "Add at least one test number before switching AI calls to test.";
   return next;
 }
 

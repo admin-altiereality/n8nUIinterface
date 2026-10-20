@@ -19,6 +19,8 @@ import {
   Users,
   HeartHandshake,
   BookOpen,
+  IndianRupee,
+  PhoneCall,
 } from 'lucide-react';
 
 interface NavItem {
@@ -64,6 +66,18 @@ const NAV_ITEMS: NavItem[] = [
     path: '/sales-funnel',
     icon: <Target className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'AI Calls',
+    path: '/calls',
+    icon: <PhoneCall className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Pricing',
+    path: '/pricing',
+    icon: <IndianRupee className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson', 'whatsapp_manager'],
   },
   {
     label: 'Social Ads',
