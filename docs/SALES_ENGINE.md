@@ -169,3 +169,28 @@ Outside WhatsApp's 24-hour window a rep can only send an approved template. Our 
 Templates are created through the Twilio Content API and submitted to WhatsApp for approval; an approved
 template can't be edited, so a change means a new template. The dashboard lists approved ones from
 `GET /api/twilio/templates`.
+
+## AI calling agent and pricing
+
+- **Sales • Voice Agent** (n8n `4Kdbah1toTgHAm6e`, built inactive) calls opted-in leads through Bolna:
+  - every 15 minutes Mon–Sat;
+  - when Sales • Inbound hands over a new form lead (`voice-new-lead`);
+  - when someone presses Call in the dashboard (`voice-call-now`).
+- **The gate** is the same in n8n and `src/lib/voiceGate.ts`:
+  - enquiry (`Consent_at`) at most 7 days old, or a callback the lead asked for;
+  - no opt-out, at most 2 attempts with 3 h between them;
+  - Mon–Sat calling hours, and the daily and monthly caps from Admin settings (`voiceMode` off/test/live).
+- **After each call** Bolna posts to a private webhook path. n8n re-fetches the execution from Bolna, then stores it via `/api/internal/voice-calls` (Firestore `voiceCalls`). On the first final delivery it updates the lead (`AI_call_*`, Stage, Next_step) and alerts the owner for hot leads.
+- **In-call tools** (`voice-agent-tools`, its own header key):
+  - pricing (`/api/internal/pricing`, shareable plans only);
+  - book demo;
+  - send an lxr_* WhatsApp template (`/api/internal/whatsapp-template`);
+  - callback;
+  - opt-out.
+- **Pricing** lives in Firestore `settings/pricing`, edited on `/pricing`. **Sales • Pricing Sheet** (`OKuYioyoHKhcJnUn`) copies it to the "Pricing" tab daily and on save.
+- **Sheet columns** (CH–CS): Consent_at, Consent_source, Consent_text_version, Voice_opt_out, AI_call_status, AI_call_attempts, Last_AI_call_at, AI_call_outcome, AI_call_summary, AI_call_recording, AI_call_minutes, AI_callback_at.
+- **Compliance:**
+  - AI calls are TRAI "A2P" calls: they need a DLT-registered 140-series number and the A2P declaration with the telco;
+  - the opening line discloses AI + recording;
+  - "stop" sets `Voice_opt_out` and `Do_not_contact`.
+- **Private material:** prompts, knowledge base and price research are in the gitignored `private/` and `reports/` folders, because this repo is public.
