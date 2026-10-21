@@ -234,8 +234,8 @@ export const GUIDE_HTML = `
 
     <section id="ai-calls">
       <h2>AI Calls <a class="path" href="/calls">/calls</a></h2>
-      <p class="who">For everyone in sales. Riya, the AI calling agent, phones people who enquired and books demos.</p>
-      <h3>Who Riya calls</h3>
+      <p class="who">For everyone in sales. Anika, the AI calling agent, phones people who enquired and books demos.</p>
+      <h3>Who Anika calls</h3>
       <ul>
         <li>Only people who <strong>asked to hear from us</strong>: a Facebook or Instagram lead form, the website or partner form, or a WhatsApp enquiry. Schools found by city runs are never called by the AI.</li>
         <li>Within <strong>7 days</strong> of their enquiry, or at a callback time they asked for. At most <strong>2 attempts</strong>, 3 hours apart.</li>
@@ -244,7 +244,7 @@ export const GUIDE_HTML = `
       </ul>
       <h3>What happens on a call</h3>
       <ul>
-        <li>Riya says she is an AI assistant from LearnXR and that the call is recorded, then talks in the person's language: Hindi, English or a mix.</li>
+        <li>Anika says she is an AI assistant from LearnXR and that the call is recorded, then talks in the person's language: Hindi, English or a mix.</li>
         <li>Schools: she explains LearnXR, answers from our approved facts, and asks for a 30-minute demo. Channel partners: she asks about their business and books a discussion with the partnerships team.</li>
         <li>She can share approved "starting from" prices only. She never offers discounts or partner margin percentages.</li>
         <li>After a booking she sends the WhatsApp template with the link, sets the lead's next step, and emails the owner.</li>
@@ -252,12 +252,12 @@ export const GUIDE_HTML = `
       </ul>
       <h3>Using the page</h3>
       <ul>
-        <li><strong>Up next</strong>: who Riya will call and why others are waiting (outside hours, callback later, cap reached). <span class="ui">Call</span> starts a call now; the same rules still apply.</li>
+        <li><strong>Up next</strong>: who Anika will call and why others are waiting (outside hours, callback later, cap reached). <span class="ui">Call</span> starts a call now; the same rules still apply.</li>
         <li><strong>Recent calls</strong>: outcome, interest out of 5, a short summary, the transcript and the recording.</li>
-        <li><strong>Voices this month</strong>: compares the two voices we test, by conversations and demos booked.</li>
+        <li><strong>Voices this month</strong>: calls, conversations and demos booked by voice.</li>
         <li>The lead drawer has an <span class="ui">AI call</span> button, and every AI call appears in the lead's timeline.</li>
       </ul>
-      <div class="note warn"><b class="lbl">Confirm what Riya booked</b>A demo booked by Riya is a request, not a calendar invite. The owner gets an email; call or message them to confirm the time.</div>
+      <div class="note warn"><b class="lbl">Confirm what Anika booked</b>A demo booked by Anika is a request, not a calendar invite. The owner gets an email; call or message them to confirm the time.</div>
       <p>Admins switch AI calling between Off, Test (team numbers only) and Live in <a href="#admin">Admin</a>, and set the daily call cap and monthly minutes.</p>
     </section>
 
@@ -266,7 +266,7 @@ export const GUIDE_HTML = `
       <p class="who">For everyone in sales.</p>
       <ul>
         <li>Our plans with what each includes, the price before and after GST, partner margins, and what competitors charge, with sources.</li>
-        <li>Plans tagged <span class="ui">AI can say</span> are the only prices Riya may mention on calls, as "starting from".</li>
+        <li>Plans tagged <span class="ui">AI can say</span> are the only prices Anika may mention on calls, as "starting from".</li>
         <li>Superadmins press <span class="ui">Edit</span> to change plans, margins or competitor rows. The "Pricing" tab of the leads sheet is refreshed from this page.</li>
       </ul>
     </section>

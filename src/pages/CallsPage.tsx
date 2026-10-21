@@ -150,7 +150,7 @@ export default function CallsPage() {
 
   return (
     <div className="page-container animate-fade-in">
-      <PageHeader title="AI Calls" subtitle="Riya, the AI calling agent, calls people who enquired and books demos.">
+      <PageHeader title="AI Calls" subtitle="Anika, the AI calling agent, calls people who enquired and books demos.">
         <div className="flex items-center gap-2">
           {data && <Badge variant="outline">{MODE_BADGE[data.settings.voiceMode]}</Badge>}
           <Button variant="outline" size="sm" onClick={load}>
