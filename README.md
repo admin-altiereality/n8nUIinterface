@@ -26,7 +26,7 @@ React webapp to trigger the PDF-to-VR-lesson n8n workflow: upload a chapter PDF,
 Your merged app now includes a second UI:
 
 - Lesson Builder: `/` (default)
-- Sales Funnel: `/sales-funnel`
+- Sales Funnel: `/sales-funnel` (includes Hot Schools, Email Template Leaderboard and City Funnel; see [docs/SALES_FUNNEL_V2.md](docs/SALES_FUNNEL_V2.md))
 
 ## Firebase (optional backend for Sales Funnel history/logs)
 

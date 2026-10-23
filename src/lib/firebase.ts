@@ -73,21 +73,16 @@ export { onAuthStateChanged, signInWithEmailAndPassword, signOut };
 export type { FirebaseUser };
 
 /**
- * Fetch the user's role from the `users` collection in the auth project's Firestore.
- * Falls back to 'associate' if no doc or no role field exists.
+ * The user's agent role from the `agentRole` custom claim (set only by functions/create-users.mjs).
+ * Matches what the API trusts; returns '' for accounts without agent access.
  */
-export async function fetchUserRole(uid: string): Promise<string> {
+export async function fetchUserRole(user: FirebaseUser): Promise<string> {
   try {
-    const db = getAuthDb();
-    const userDoc = await getDoc(doc(db, 'users', uid));
-    if (userDoc.exists()) {
-      const data = userDoc.data();
-      return data.role || data.userRole || 'associate';
-    }
-    return 'associate';
+    const { claims } = await user.getIdTokenResult();
+    return typeof claims.agentRole === 'string' ? claims.agentRole : '';
   } catch (e) {
-    console.warn('Failed to fetch user role from Firestore, defaulting to associate:', e);
-    return 'associate';
+    console.warn('Failed to read agentRole claim:', e);
+    return '';
   }
 }
 

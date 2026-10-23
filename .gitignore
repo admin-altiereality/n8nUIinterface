@@ -29,3 +29,8 @@ uploads/
 
 # Temp clone used for code inspection
 leadgeneration-temp/
+n8n-backups/
+
+# Internal research, pricing and agent prompts (repo is public)
+private/
+reports/

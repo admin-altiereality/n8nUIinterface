@@ -2,10 +2,10 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCheck,
-  IndianRupee,
-  Megaphone,
   Download,
+  IndianRupee,
   Loader2,
+  Megaphone,
   MessageCircle,
   RefreshCw,
   Target,
@@ -24,15 +24,19 @@ import {
   type AdsPerformance,
   type OpsDashboard,
 } from '../api/opsClient';
-import { leadPhoneForMessaging, leadSource } from '../api/sheetsClient';
+import { leadPhoneForMessaging } from '../api/sheetsClient';
+import { SOURCE_LABELS, formatInr, leadSource, type LeadSource } from '../lib/pipeline';
 
 function fmt(value: number | undefined): string {
   return new Intl.NumberFormat().format(value || 0);
 }
 
 function inr(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '—';
-  return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(value);
+  return value == null || !Number.isFinite(value) ? '—' : formatInr(value);
+}
+
+function sourceLabel(source: string): string {
+  return SOURCE_LABELS[source as LeadSource] || source;
 }
 
 function shortDate(value: unknown): string {
@@ -196,9 +200,9 @@ export default function OpsDashboardPage() {
         <Card className="lg:col-span-4">
           <CardHeader><CardTitle>Leads By Source</CardTitle></CardHeader>
           <CardContent>
-            {sourceRows.length ? sourceRows.map(([label, count]) => (
-              <div key={label} className="flex items-center justify-between rounded-md bg-zinc-950/50 px-3 py-2">
-                <span className="text-xs text-zinc-300">{label}</span>
+            {sourceRows.length ? sourceRows.map(([source, count]) => (
+              <div key={source} className="flex items-center justify-between rounded-md bg-zinc-950/50 px-3 py-2">
+                <span className="text-xs text-zinc-300">{sourceLabel(source)}</span>
                 <Badge>{fmt(count)}</Badge>
               </div>
             )) : <EmptyState text={loading ? 'Loading sources...' : 'No lead source data'} />}
@@ -284,7 +288,7 @@ export default function OpsDashboardPage() {
                 <p className="mt-1 text-[11px] text-red-200/80">
                   {item.errorCode ? `Twilio ${String(item.errorCode)}` : String(item.twilioCode || item.twilioMessage || 'No error code')}
                 </p>
-                {item.updatedAt && <p className="mt-1 text-[10px] text-red-200/60">{shortDate(item.updatedAt)}</p>}
+                {item.updatedAt ? <p className="mt-1 text-[10px] text-red-200/60">{shortDate(item.updatedAt)}</p> : null}
               </div>
             )) : <EmptyState text="No failed sends logged" />}
           </CardContent>
@@ -320,8 +324,9 @@ function Kpi({ icon, label, value, tone }: { icon: React.ReactNode; label: strin
   );
 }
 
-function SourceChip({ source }: { source: string }) {
-  return <Badge variant={source.toLowerCase() === 'meta ads' ? 'info' : 'outline'} className="shrink-0">{source}</Badge>;
+function SourceChip({ source }: { source: LeadSource }) {
+  const isAd = source === 'instagram_ad' || source === 'facebook_ad';
+  return <Badge variant={isAd ? 'info' : 'outline'} className="shrink-0">{SOURCE_LABELS[source]}</Badge>;
 }
 
 function EmptyState({ text }: { text: string }) {
