@@ -103,9 +103,10 @@ const SALES_FUNNEL_WORKFLOW_ID =
 const LEGACY_SALES_WORKFLOW_ID = "sLk0CAalsSlR5z4P";
 const N8N_WEBHOOK_BASE = (process.env.N8N_WEBHOOK_BASE || "https://n8n.altiereality.com/webhook").replace(/\/$/, "");
 const SHEET_CACHE_MS = 60_000;
-// TODO: replace the placeholder default with the real n8n ads-performance webhook URL once it is published.
+/** GET webhook on n8n "Ads • All-in-one" (dcEqEez5PUzg3l1G), Header Auth on X-Altie-Key. */
 const ADS_PERFORMANCE_WEBHOOK_URL =
-  process.env.N8N_ADS_PERFORMANCE_WEBHOOK_URL || "https://n8n.altiereality.com/webhook/ads-performance-PLACEHOLDER";
+  process.env.N8N_ADS_PERFORMANCE_WEBHOOK_URL ||
+  `${N8N_WEBHOOK_BASE}/ads-performance-4b84084c84a5f6c2bbb18957`;
 
 const LEAD_ID_PATTERN = /^lx[0-9a-z]+(-\d+)?$/;
 const LEAD_STAGES = new Set(["New", "Contacted", "Engaged", "Demo booked", "Demo done", "Proposal", "Won", "Lost"]);
