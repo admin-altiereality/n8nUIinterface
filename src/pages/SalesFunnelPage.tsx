@@ -42,6 +42,7 @@ import {
 import {
   fetchSheetLeads,
   leadPhoneForMessaging,
+  leadSource,
   type SchoolLeadRow,
 } from '../api/sheetsClient';
 import { writeOpsAuditEvent } from '../api/opsClient';
@@ -963,6 +964,15 @@ export default function SalesFunnelPage() {
                               >
                                 {value || phone}
                               </Link>
+                            </td>
+                          );
+                        }
+                        if (col === 'School Name') {
+                          const source = leadSource(row);
+                          return (
+                            <td key={col} className="px-3 py-2 whitespace-nowrap max-w-[220px] truncate text-zinc-300">
+                              <Badge variant={source.toLowerCase() === 'meta ads' ? 'info' : 'outline'} className="mr-2">{source}</Badge>
+                              {value || '—'}
                             </td>
                           );
                         }

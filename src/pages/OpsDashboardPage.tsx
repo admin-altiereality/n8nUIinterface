@@ -2,10 +2,13 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCheck,
+  IndianRupee,
+  Megaphone,
   Download,
   Loader2,
   MessageCircle,
   RefreshCw,
+  Target,
   Timer,
   Users,
 } from 'lucide-react';
@@ -16,13 +19,20 @@ import { Badge } from '../components/ui/badge';
 import { PageHeader } from '../components/layout/PageHeader';
 import {
   downloadOpsCsv,
+  fetchAdsPerformance,
   fetchOpsDashboard,
+  type AdsPerformance,
   type OpsDashboard,
 } from '../api/opsClient';
-import { leadPhoneForMessaging } from '../api/sheetsClient';
+import { leadPhoneForMessaging, leadSource } from '../api/sheetsClient';
 
 function fmt(value: number | undefined): string {
   return new Intl.NumberFormat().format(value || 0);
+}
+
+function inr(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(value);
 }
 
 function shortDate(value: unknown): string {
@@ -56,10 +66,16 @@ export default function OpsDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ads, setAds] = useState<AdsPerformance | null>(null);
+  const [adsUnavailable, setAdsUnavailable] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // Ads data is optional: a failure here only shows the Ads empty state, never the page error.
+    void fetchAdsPerformance()
+      .then((result) => { setAds(result); setAdsUnavailable(false); })
+      .catch(() => { setAds(null); setAdsUnavailable(true); });
     try {
       setData(await fetchOpsDashboard());
     } catch (e) {
@@ -73,6 +89,10 @@ export default function OpsDashboardPage() {
 
   const statusRows = useMemo(
     () => Object.entries(data?.leadsByStatus || {}).sort((a, b) => b[1] - a[1]),
+    [data]
+  );
+  const sourceRows = useMemo(
+    () => Object.entries(data?.leadsBySource || {}).sort((a, b) => b[1] - a[1]),
     [data]
   );
   const campaignRows = useMemo(
@@ -93,6 +113,8 @@ export default function OpsDashboardPage() {
   };
 
   const kpis = data?.kpis;
+  const adsCampaigns = ads?.campaigns || [];
+  const capPct = ads && ads.cap_inr > 0 ? Math.min(100, (ads.spend_mtd_inr / ads.cap_inr) * 100) : 0;
 
   return (
     <div className="page-container space-y-6">
@@ -120,6 +142,68 @@ export default function OpsDashboardPage() {
         <Card><CardContent className="pt-4"><Kpi icon={<CheckCheck className="h-5 w-5" />} label="Delivered/read today" value={`${fmt(kpis?.messagesDeliveredToday)} / ${fmt(kpis?.messagesReadToday)}`} /></CardContent></Card>
         <Card><CardContent className="pt-4"><Kpi icon={<Users className="h-5 w-5" />} label="Total leads" value={fmt(kpis?.totalLeads)} /></CardContent></Card>
         <Card><CardContent className="pt-4"><Kpi icon={<AlertTriangle className="h-5 w-5" />} label="Failed WhatsApp" value={fmt(kpis?.failedWhatsApp)} tone="danger" /></CardContent></Card>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+        <Card className="lg:col-span-8">
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle>Meta Ads{ads?.month ? ` · ${ads.month}` : ''}</CardTitle>
+              {ads?.paused_by_guard && <Badge variant="warning">Paused by budget guard</Badge>}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {ads && adsCampaigns.length ? (
+              <>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                  <div className="space-y-2">
+                    <Kpi icon={<IndianRupee className="h-5 w-5" />} label="Spend MTD / cap" value={`${inr(ads.spend_mtd_inr)} / ${inr(ads.cap_inr)}`} tone={capPct >= 100 ? 'danger' : undefined} />
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800" role="progressbar" aria-valuenow={Math.round(capPct)} aria-valuemin={0} aria-valuemax={100}>
+                      <div className={`h-full rounded-full ${capPct >= 90 ? 'bg-amber-400' : 'bg-indigo-400'}`} style={{ width: `${capPct}%` }} />
+                    </div>
+                  </div>
+                  <Kpi icon={<Megaphone className="h-5 w-5" />} label="Leads MTD" value={fmt(ads.leads_mtd)} />
+                  <Kpi icon={<Target className="h-5 w-5" />} label="Cost per lead" value={inr(ads.cpl_inr)} />
+                </div>
+                <div className="overflow-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="text-zinc-500">
+                      <tr>
+                        {['Campaign', 'Status', 'Daily budget', 'Spend MTD', 'Leads', 'CPL'].map((h) => <th key={h} className="pb-2 font-medium">{h}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/80 text-zinc-300">
+                      {adsCampaigns.map((c) => (
+                        <tr key={c.id}>
+                          <td className="py-2 font-medium text-zinc-100">{c.name}</td>
+                          <td><Badge variant={String(c.status).toUpperCase() === 'ACTIVE' ? 'success' : 'outline'}>{c.status}</Badge></td>
+                          <td>{inr(c.daily_budget_inr)}</td>
+                          <td>{inr(c.spend_mtd_inr)}</td>
+                          <td>{fmt(c.leads_mtd)}</td>
+                          <td>{inr(c.cpl_inr)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : (
+              <EmptyState text={adsUnavailable ? 'Ads performance is not available right now.' : ads ? 'No Meta ad campaigns running this month.' : 'Loading ads performance...'} />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="lg:col-span-4">
+          <CardHeader><CardTitle>Leads By Source</CardTitle></CardHeader>
+          <CardContent>
+            {sourceRows.length ? sourceRows.map(([label, count]) => (
+              <div key={label} className="flex items-center justify-between rounded-md bg-zinc-950/50 px-3 py-2">
+                <span className="text-xs text-zinc-300">{label}</span>
+                <Badge>{fmt(count)}</Badge>
+              </div>
+            )) : <EmptyState text={loading ? 'Loading sources...' : 'No lead source data'} />}
+          </CardContent>
+        </Card>
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
@@ -173,7 +257,10 @@ export default function OpsDashboardPage() {
               const timelineId = leadTimelineId(phone);
               return (
                 <div key={`${lead['School Name']}-${index}`} className="rounded-md bg-zinc-950/50 p-3">
-                  <p className="truncate text-xs font-medium text-zinc-100">{String(lead['School Name'] || 'Unknown lead')}</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="truncate text-xs font-medium text-zinc-100">{String(lead['School Name'] || 'Unknown lead')}</p>
+                    <SourceChip source={leadSource(lead)} />
+                  </div>
                   <p className="mt-1 text-[11px] text-zinc-500">{shortDate(lead.Next_Follow_up)}</p>
                   <div className="mt-2 flex flex-wrap gap-3">
                     {phone && <Link className="inline-flex items-center gap-1 text-[11px] text-indigo-300 hover:underline" to={`/twilio-messaging?contact=${encodeURIComponent(phone)}`}><MessageCircle className="h-3 w-3" /> Open chat</Link>}
@@ -231,6 +318,10 @@ function Kpi({ icon, label, value, tone }: { icon: React.ReactNode; label: strin
       </div>
     </div>
   );
+}
+
+function SourceChip({ source }: { source: string }) {
+  return <Badge variant={source.toLowerCase() === 'meta ads' ? 'info' : 'outline'} className="shrink-0">{source}</Badge>;
 }
 
 function EmptyState({ text }: { text: string }) {
