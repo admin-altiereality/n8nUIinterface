@@ -26,7 +26,7 @@ import {
   updateEntity,
   verifyMetaSignature,
 } from "./meta";
-import { auditEvents, messageEvents, rowEvents, schoolSummary, sortTimeline, toE164, type TwilioMessage } from "./schools";
+import { auditEvents, messageEvents, rowEvents, schoolSummary, sortTimeline, sourceOf, toE164, type TwilioMessage } from "./schools";
 import {
   customerHealth,
   defaultRenewalAt,
@@ -92,6 +92,7 @@ const SHEETS_ROLES = new Set(["superadmin", "associate", "salesperson"]);
 const OPS_ROLES = new Set(["superadmin", "associate", "salesperson", "whatsapp_manager"]);
 /** Social Ads: associates can watch; only superadmins can spend (pause/resume, budgets, boosts). */
 const META_ROLES = new Set(["superadmin", "associate"]);
+const ADS_ROLES = new Set(["superadmin", "associate", "salesperson"]);
 const META_WRITE_ROLES = new Set(["superadmin"]);
 /** Settings and system health. */
 const ADMIN_ROLES = new Set(["superadmin"]);
@@ -102,6 +103,9 @@ const SALES_FUNNEL_WORKFLOW_ID =
 const LEGACY_SALES_WORKFLOW_ID = "sLk0CAalsSlR5z4P";
 const N8N_WEBHOOK_BASE = (process.env.N8N_WEBHOOK_BASE || "https://n8n.altiereality.com/webhook").replace(/\/$/, "");
 const SHEET_CACHE_MS = 60_000;
+// TODO: replace the placeholder default with the real n8n ads-performance webhook URL once it is published.
+const ADS_PERFORMANCE_WEBHOOK_URL =
+  process.env.N8N_ADS_PERFORMANCE_WEBHOOK_URL || "https://n8n.altiereality.com/webhook/ads-performance-PLACEHOLDER";
 
 const LEAD_ID_PATTERN = /^lx[0-9a-z]+(-\d+)?$/;
 const LEAD_STAGES = new Set(["New", "Contacted", "Engaged", "Demo booked", "Demo done", "Proposal", "Won", "Lost"]);
@@ -820,6 +824,7 @@ function filterLeadRows(rows: unknown[], query: Record<string, unknown>): Record
   const status = safeText(query.status).toLowerCase();
   const leadStatus = safeText(query.leadStatus).toLowerCase();
   const whatsappStatus = safeText(query.whatsappStatus).toLowerCase();
+  const source = safeText(query.source).toLowerCase();
 
   return rows.filter((row): row is Record<string, unknown> => {
     if (!row || typeof row !== "object") return false;
@@ -829,6 +834,7 @@ function filterLeadRows(rows: unknown[], query: Record<string, unknown>): Record
     if (status && get("Status") !== status) return false;
     if (leadStatus && get("Lead_status") !== leadStatus) return false;
     if (whatsappStatus && get("Whatsapp_status") !== whatsappStatus) return false;
+    if (source && sourceOf(r) !== source) return false;
     if (q) {
       const hay = [
         get("School Name"),
@@ -837,6 +843,8 @@ function filterLeadRows(rows: unknown[], query: Record<string, unknown>): Record
         get("Phone number"),
         get("Lead_status"),
         get("Whatsapp_status"),
+        get("Lead_campaign"),
+        get("Role"),
       ].join(" ");
       if (!hay.includes(q)) return false;
     }
@@ -1450,10 +1458,13 @@ app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
       .sort((a, b) => parseMaybeDate(b.updatedAt) - parseMaybeDate(a.updatedAt));
     const failedWhatsApp = failedStatusRows.length;
     const leadsByStatus: Record<string, number> = {};
+    const leadsBySource: Record<string, number> = {};
     const campaignByCity: Record<string, Record<string, number>> = {};
     for (const lead of leadsResult.rows) {
       const status = leadStatus(lead);
       leadsByStatus[status] = (leadsByStatus[status] || 0) + 1;
+      const source = sourceOf(lead);
+      leadsBySource[source] = (leadsBySource[source] || 0) + 1;
       const city = leadCity(lead);
       const bucket = campaignByCity[city] || {
         scraped: 0,
@@ -1496,6 +1507,7 @@ app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
         inboundToday: inbound.filter((m) => safeText(m.createdAt).startsWith(today)).length,
       },
       leadsByStatus,
+      leadsBySource,
       campaignByCity,
       followUps: leadsResult.rows.filter(isOverdueFollowUp).slice(0, 25),
       failedMessages: failedStatusRows.slice(0, 25),
@@ -1506,6 +1518,33 @@ app.get("/api/ops/dashboard", requireRoles(OPS_ROLES), async (req, res) => {
   } catch (err) {
     logger.error("ops dashboard failed", err);
     return res.status(502).json({ message: err instanceof Error ? err.message : "Failed to load ops dashboard." });
+  }
+});
+
+app.options("/api/ops/ads", cors({
+  origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
+}));
+
+/** Proxies the n8n ads-performance webhook (Meta spend vs the monthly cap, leads, CPL, campaigns) as-is. */
+app.get("/api/ops/ads", requireRoles(ADS_ROLES), async (_req, res) => {
+  try {
+    const upstream = await fetch(ADS_PERFORMANCE_WEBHOOK_URL, {
+      headers: { Accept: "application/json", "X-Altie-Key": n8nWebhookSecret.value() },
+      signal: AbortSignal.timeout(30_000),
+    });
+    const text = await upstream.text();
+    if (!upstream.ok) throw new Error(`Ads performance webhook returned ${upstream.status}.`);
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`Unexpected ads-performance webhook response: ${text.slice(0, 120)}`);
+    }
+    return res.json(data);
+  } catch (err) {
+    logger.error("ads performance proxy failed", err);
+    const message = err instanceof Error ? err.message : "Failed to load ads performance.";
+    return res.status(502).json({ error: message, message });
   }
 });
 

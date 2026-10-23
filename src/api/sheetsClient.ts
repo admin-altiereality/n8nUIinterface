@@ -96,6 +96,12 @@ export type SchoolLeadRow = Record<string, unknown> & {
   Paid_amount?: string;
   Paid_at?: string;
   Clicked_buttons?: string;
+  // Lead source (Inbound / Meta lead forms); read through leadSource() in lib/pipeline
+  Lead_source?: string;
+  Lead_campaign?: string;
+  Lead_form?: string;
+  Leadgen_id?: string;
+  Role?: string;
 };
 
 export type FetchLeadsResult = {
@@ -110,6 +116,8 @@ export type FetchLeadsOptions = {
   status?: string;
   leadStatus?: string;
   whatsappStatus?: string;
+  /** Lead_source key, e.g. instagram_ad; matched against the inferred source server-side. */
+  source?: string;
   q?: string;
   limit?: number;
 };
@@ -125,6 +133,7 @@ export async function fetchSheetLeads(options: FetchLeadsOptions = {}): Promise<
   if (options.status) q.set('status', options.status);
   if (options.leadStatus) q.set('leadStatus', options.leadStatus);
   if (options.whatsappStatus) q.set('whatsappStatus', options.whatsappStatus);
+  if (options.source) q.set('source', options.source);
   if (options.q) q.set('q', options.q);
   if (options.limit != null) q.set('limit', String(options.limit));
   const qs = q.toString();

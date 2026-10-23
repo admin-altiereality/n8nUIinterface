@@ -43,7 +43,8 @@ const SOURCE_TITLES: Record<string, string> = {
   cold_email: "Found by city run",
 };
 
-function sourceOf(row: Row): string {
+/** Lead_source key (instagram_ad, facebook_ad, website, whatsapp, cold_email); older rows are inferred. */
+export function sourceOf(row: Row): string {
   const stored = str(row, "Lead_source").toLowerCase();
   if (SOURCE_TITLES[stored]) return stored;
   const kw = str(row, "XR_keywords").toLowerCase();
