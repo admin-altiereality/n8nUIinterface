@@ -47,7 +47,16 @@ export type SchoolLeadRow = Record<string, unknown> & {
   Last_Follow_up?: string;
   Next_Follow_up?: string;
   XR_status?: string;
+  Source?: string;
+  Campaign?: string;
+  Ad_id?: string;
+  Role?: string;
 };
+
+/** Leads without a Source column predate Meta ads and came from city outreach. */
+export function leadSource(row: SchoolLeadRow): string {
+  return String(row.Source || '').trim() || 'Outreach';
+}
 
 export type FetchLeadsResult = {
   ok: boolean;
@@ -61,6 +70,7 @@ export type FetchLeadsOptions = {
   status?: string;
   leadStatus?: string;
   whatsappStatus?: string;
+  source?: string;
   q?: string;
   limit?: number;
 };
@@ -76,6 +86,7 @@ export async function fetchSheetLeads(options: FetchLeadsOptions = {}): Promise<
   if (options.status) q.set('status', options.status);
   if (options.leadStatus) q.set('leadStatus', options.leadStatus);
   if (options.whatsappStatus) q.set('whatsappStatus', options.whatsappStatus);
+  if (options.source) q.set('source', options.source);
   if (options.q) q.set('q', options.q);
   if (options.limit != null) q.set('limit', String(options.limit));
   const qs = q.toString();

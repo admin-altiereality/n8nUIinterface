@@ -74,12 +74,35 @@ export type OpsDashboard = {
   role: string | null;
   kpis: OpsKpis;
   leadsByStatus: Record<string, number>;
+  /** Lead counts by sheet `Source`; rows without one count as "Outreach". */
+  leadsBySource?: Record<string, number>;
   campaignByCity: Record<string, Record<string, number>>;
   followUps: SchoolLeadRow[];
   failedMessages: Array<Record<string, unknown>>;
   assignments: LeadAssignment[];
   recentAudit: OpsAuditEvent[];
   canReadLeadRows: boolean;
+};
+
+export type AdsCampaign = {
+  id: string;
+  name: string;
+  status: string;
+  daily_budget_inr: number;
+  spend_mtd_inr: number;
+  leads_mtd: number;
+  cpl_inr: number | null;
+};
+
+/** Contract of the n8n ads-performance webhook, proxied as-is by `GET /api/ops/ads`. */
+export type AdsPerformance = {
+  month: string;
+  cap_inr: number;
+  spend_mtd_inr: number;
+  leads_mtd: number;
+  cpl_inr: number | null;
+  paused_by_guard: boolean;
+  campaigns: AdsCampaign[];
 };
 
 export type LeadTimelineEvent = {
@@ -100,6 +123,12 @@ export async function fetchOpsDashboard(): Promise<OpsDashboard> {
   const res = await fetchWithAuthRetry(opsUrl('/api/ops/dashboard'));
   if (!res.ok) await parseError(res, 'Failed to load ops dashboard');
   return (await res.json()) as OpsDashboard;
+}
+
+export async function fetchAdsPerformance(): Promise<AdsPerformance> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/ops/ads'));
+  if (!res.ok) await parseError(res, 'Failed to load ads performance');
+  return (await res.json()) as AdsPerformance;
 }
 
 export async function fetchLeadTimeline(leadId: string): Promise<LeadTimeline> {
