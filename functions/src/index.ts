@@ -307,8 +307,9 @@ async function authenticateRequest(req: express.Request): Promise<AuthedUser | {
 
   const idToken = match[1];
   try {
-    // checkRevoked: a disabled account or revoked session loses access now, not when its token expires.
-    const decoded = await getAuthProjectVerifier().verifyIdToken(idToken, true);
+    // No checkRevoked: it needs an Auth user lookup in the auth project, which this function's service
+    // account can't do (auth/insufficient-permission → every request 401). Grant it first to turn it on.
+    const decoded = await getAuthProjectVerifier().verifyIdToken(idToken);
     if (!decoded.uid) {
       return { error: "Invalid ID token.", status: 401 };
     }
