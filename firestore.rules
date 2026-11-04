@@ -215,7 +215,12 @@ service cloud.firestore {
                       get(/databases/$(database)/documents/users/$(request.auth.uid)).data.class_ids != null &&
                       resource.data.managed_class_ids.hasAny(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.class_ids));
       
-      allow create: if isOwner(userId);
+      // Self-signup can't mint a staff role or pre-approve itself: role and approval are set by
+      // admins or the Admin SDK (the agents data-token bridge), which bypasses these rules.
+      allow create: if isOwner(userId) &&
+        !(request.resource.data.get('role', '') in ['superadmin', 'admin', 'associate', 'partner', 'builder', 'salesperson', 'whatsapp_manager']) &&
+        (request.resource.data.get('approvalStatus', 'pending') == 'pending' ||
+         (request.resource.data.get('isGuest', false) == true && request.resource.data.approvalStatus == 'approved'));
       
       // Allow update if:
       // 1. User is updating their own document (but not approvalStatus or role), OR
@@ -359,7 +364,8 @@ service cloud.firestore {
     
     // System collections - only admins and service accounts
     match /system/{document=**} {
-      allow read, write: if isAdmin() || request.auth.token.firebase.sign_in_provider == 'google.com';
+      // Service accounts use the Admin SDK, which bypasses rules; any Google sign-in is not a service account.
+      allow read, write: if isAdmin();
     }
     
     // Curriculum Chapters collection - public read access, admin/superadmin write access

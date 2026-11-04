@@ -70,7 +70,11 @@ export type SalesExecutionsMeta = {
 
 export let lastSalesExecutionsMeta: SalesExecutionsMeta = { source: 'unknown' };
 
-const WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL as string | undefined;
+// Dev-only direct webhook: production builds start runs through the role-checked /api/builder/run proxy,
+// so the webhook URL is not shipped in the public bundle.
+const WEBHOOK_URL = import.meta.env.PROD
+  ? undefined
+  : (import.meta.env.VITE_N8N_WEBHOOK_URL as string | undefined);
 const API_PROXY_URL = import.meta.env.VITE_API_PROXY_URL as string | undefined;
 
 function isProxyUsable(url: string | undefined): boolean {
@@ -104,7 +108,10 @@ async function fetchWithAuthRetry(url: string, init?: RequestInit): Promise<Resp
  */
 export const canPollExecution = getProxyBase() !== null || Boolean(import.meta.env.PROD);
 
-if (!WEBHOOK_URL) {
+/** Lesson runs can start: through the authenticated proxy, or (local dev only) the direct webhook. */
+export const canTriggerAutomation = getProxyBase() !== null || Boolean(WEBHOOK_URL);
+
+if (!canTriggerAutomation) {
   // eslint-disable-next-line no-console
   console.warn(
     'VITE_N8N_WEBHOOK_URL is not set. Configure it in a .env file to connect the UI to your n8n workflow.'
@@ -119,7 +126,8 @@ export async function triggerAutomation(params: {
   classLevel: string;
   subject: string;
 }): Promise<RunResult> {
-  if (!WEBHOOK_URL) {
+  const proxyBase = getProxyBase();
+  if (proxyBase === null && !WEBHOOK_URL) {
     return {
       ok: false,
       httpStatus: 0,
@@ -138,10 +146,10 @@ export async function triggerAutomation(params: {
   formData.append('class', params.classLevel);
   formData.append('subject', params.subject);
 
-  const response = await fetch(WEBHOOK_URL, {
-    method: 'POST',
-    body: formData
-  });
+  const response =
+    proxyBase !== null
+      ? await fetchWithAuthRetry(`${proxyBase}/api/builder/run`, { method: 'POST', body: formData })
+      : await fetch(WEBHOOK_URL!, { method: 'POST', body: formData });
 
   let body: unknown = null;
   try {
