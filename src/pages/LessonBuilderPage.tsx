@@ -10,7 +10,8 @@ import {
   RunResult,
   triggerAutomation,
   listExecutions,
-  N8nExecutionListItem
+  N8nExecutionListItem,
+  canTriggerAutomation
 } from '../api/n8nClient';
 import { Button } from '../components/ui/button';
 import { Textarea } from '../components/ui/textarea';
@@ -122,7 +123,7 @@ const LessonBuilderPage: React.FC = () => {
     return null;
   }, []);
 
-  const n8nConfigured = useMemo(() => Boolean(import.meta.env.VITE_N8N_WEBHOOK_URL), []);
+  const n8nConfigured = canTriggerAutomation;
   const n8nWorkflowId = useMemo(
     () => (import.meta.env.VITE_N8N_WORKFLOW_ID ? String(import.meta.env.VITE_N8N_WORKFLOW_ID) : null),
     []

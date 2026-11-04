@@ -99,6 +99,10 @@ const ADMIN_ROLES = new Set(["superadmin"]);
 
 const SALES_FUNNEL_WORKFLOW_ID =
   process.env.N8N_SALES_WORKFLOW_ID || "6pBPEDzIfj8939GG";
+/** The PDF-to-VR lesson workflow: the only one non-superadmins may read through the n8n proxy. */
+const LESSON_BUILDER_WORKFLOW_ID = process.env.N8N_BUILDER_WORKFLOW_ID || "8oaEb9OeYTX4vtQ4";
+/** That workflow's Webhook path; the browser reaches it only through /api/builder/run. */
+const LESSON_BUILDER_WEBHOOK_PATH = process.env.N8N_BUILDER_WEBHOOK_PATH || "b8608c3e";
 /** The funnel before "Sales • Scrape & Qualify v3"; its past runs stay viewable. */
 const LEGACY_SALES_WORKFLOW_ID = "sLk0CAalsSlR5z4P";
 const N8N_WEBHOOK_BASE = (process.env.N8N_WEBHOOK_BASE || "https://n8n.altiereality.com/webhook").replace(/\/$/, "");
@@ -303,6 +307,8 @@ async function authenticateRequest(req: express.Request): Promise<AuthedUser | {
 
   const idToken = match[1];
   try {
+    // No checkRevoked: it needs an Auth user lookup in the auth project, which this function's service
+    // account can't do (auth/insufficient-permission → every request 401). Grant it first to turn it on.
     const decoded = await getAuthProjectVerifier().verifyIdToken(idToken);
     if (!decoded.uid) {
       return { error: "Invalid ID token.", status: 401 };
@@ -670,9 +676,18 @@ async function verifyTwilioWebhook(
     const apiRes = await fetch(url, { headers: { Authorization: twilioBasicAuthHeader(t.accountSid, t.authToken) } });
     if (!apiRes.ok) return null;
     const msg = (await apiRes.json()) as Record<string, unknown>;
+    // An outbound SID replayed at the inbound hook would read as a lead's reply.
+    if (path === "/api/twilio/inbound" && msg.direction !== "inbound") return null;
     logger.info("Twilio webhook verified by API lookup (signature mismatch)", { path });
+    // Unsigned params are attacker-controlled: keep only media URLs on this message in this account.
+    const mediaPrefix = `https://api.twilio.com/2010-04-01/Accounts/${t.accountSid}/Messages/${sid}/Media/`;
+    const media = Object.fromEntries(
+      Object.entries(params).filter(
+        ([k, v]) => (/^MediaUrl\d+$/.test(k) && v.startsWith(mediaPrefix)) || /^MediaContentType\d+$/.test(k)
+      )
+    );
     return {
-      ...params,
+      ...media,
       MessageSid: sid,
       From: String(msg.from ?? ""),
       To: String(msg.to ?? ""),
@@ -1026,7 +1041,10 @@ function isOverdueFollowUp(row: Record<string, unknown>): boolean {
 }
 
 function csvEscape(value: unknown): string {
-  const raw = String(value ?? "");
+  let raw = String(value ?? "");
+  // Scraped names and inbound text reach this file; a leading = + - @ would run as a formula in Excel/Sheets.
+  // Plain numbers like +91 98765 43210 are left alone.
+  if (/^[=@\t\r]/.test(raw) || (/^[+-]/.test(raw) && !/^[+-][\d\s().-]*$/.test(raw))) raw = `'${raw}`;
   if (/[",\n\r]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
   return raw;
 }
@@ -1115,79 +1133,110 @@ app.options("/api/n8n/executions/:id", cors({
   origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
 }));
 
-app.get("/api/n8n/executions", requireRoles(N8N_ROLES), async (req, res) => {
+/**
+ * Builders see only the lesson workflow's runs: other executions carry lead PII and node
+ * parameters, and workflowData (every node's config) never leaves this function for them.
+ */
+async function proxyN8nExecutions(req: express.Request, res: express.Response, role: string, id?: string) {
   const { apiUrl, apiKey } = getN8nConfig();
   if (!apiUrl || !apiKey) {
     return res.status(500).json({ message: "n8n proxy not configured (missing api url/key)." });
   }
-
-  const takeRaw =
-    typeof req.query.limit === "string"
-      ? req.query.limit
-      : typeof req.query.take === "string"
-        ? req.query.take
-        : "10";
-  const takeNum = Number.parseInt(takeRaw, 10);
-  const take = Number.isFinite(takeNum) ? Math.min(Math.max(takeNum, 1), 100) : 10;
-
-  const workflowId =
-    typeof req.query.workflowId === "string"
-      ? req.query.workflowId
-      : typeof req.query.workflow === "string"
-        ? req.query.workflow
-        : undefined;
-
   const base = apiUrl.replace(/\/$/, "");
-  const workflowParam = workflowId ? `&workflowId=${encodeURIComponent(workflowId)}` : "";
-  const url = `${base}/api/v1/executions?limit=${encodeURIComponent(take)}${workflowParam}`;
-
-  try {
-    const upstream = await fetch(url, {
-      headers: { "X-N8N-API-KEY": apiKey },
-    });
-
-    const text = await upstream.text();
-    res.status(upstream.status);
-    res.setHeader("content-type", upstream.headers.get("content-type") ?? "application/json");
-
+  const scoped = role !== "superadmin";
+  const send = (status: number, text: string, contentType: string | null) => {
+    res.status(status);
+    res.setHeader("content-type", contentType ?? "application/json");
     try {
       return res.send(JSON.stringify(JSON.parse(text)));
     } catch {
       return res.send(text);
     }
+  };
+
+  try {
+    if (!id) {
+      const takeRaw =
+        typeof req.query.limit === "string"
+          ? req.query.limit
+          : typeof req.query.take === "string"
+            ? req.query.take
+            : "10";
+      const takeNum = Number.parseInt(takeRaw, 10);
+      const take = Number.isFinite(takeNum) ? Math.min(Math.max(takeNum, 1), 100) : 10;
+      const requested =
+        typeof req.query.workflowId === "string"
+          ? req.query.workflowId
+          : typeof req.query.workflow === "string"
+            ? req.query.workflow
+            : undefined;
+      const workflowId = scoped ? LESSON_BUILDER_WORKFLOW_ID : requested;
+      const workflowParam = workflowId ? `&workflowId=${encodeURIComponent(workflowId)}` : "";
+      const upstream = await fetch(`${base}/api/v1/executions?limit=${encodeURIComponent(take)}${workflowParam}`, {
+        headers: { "X-N8N-API-KEY": apiKey },
+      });
+      return send(upstream.status, await upstream.text(), upstream.headers.get("content-type"));
+    }
+
+    const upstream = await fetch(`${base}/api/v1/executions/${encodeURIComponent(id)}?includeData=true`, {
+      headers: { "X-N8N-API-KEY": apiKey },
+    });
+    const text = await upstream.text();
+    if (!scoped || !upstream.ok) return send(upstream.status, text, upstream.headers.get("content-type"));
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return res.status(502).json({ message: "Unexpected n8n response." });
+    }
+    const workflowData = data.workflowData as { id?: string } | undefined;
+    const wfId = (typeof data.workflowId === "string" && data.workflowId) || workflowData?.id || null;
+    if (wfId !== LESSON_BUILDER_WORKFLOW_ID) {
+      return res.status(403).json({ message: "Forbidden: execution is not a lesson builder run." });
+    }
+    delete data.workflowData;
+    return res.status(upstream.status).json(data);
   } catch (err) {
     logger.error("n8n executions proxy failed", err);
     return res.status(502).json({ message: "Failed to fetch executions from n8n." });
   }
-});
+}
 
-app.get("/api/n8n/executions/:id", requireRoles(N8N_ROLES), async (req, res) => {
-  const { apiUrl, apiKey } = getN8nConfig();
-  if (!apiUrl || !apiKey) {
-    return res.status(500).json({ message: "n8n proxy not configured (missing api url/key)." });
+/**
+ * Lesson builder run: the multipart form (PDF + prompt) is forwarded byte-for-byte to the n8n webhook with
+ * X-Altie-Key, so the webhook URL stays out of the public bundle and only builder roles can start (paid) runs.
+ */
+app.post("/api/builder/run", requireRoles(N8N_ROLES), async (req, res) => {
+  const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody;
+  const contentType = req.get("content-type") || "";
+  if (!rawBody?.length || !/^multipart\/form-data/i.test(contentType)) {
+    return res.status(400).json({ message: "Expected a multipart form." });
   }
-
-  const id = req.params.id;
-  const base = apiUrl.replace(/\/$/, "");
-  const url = `${base}/api/v1/executions/${encodeURIComponent(id)}?includeData=true`;
-
   try {
-    const upstream = await fetch(url, {
-      headers: { "X-N8N-API-KEY": apiKey },
+    const upstream = await fetch(`${N8N_WEBHOOK_BASE}/${LESSON_BUILDER_WEBHOOK_PATH}`, {
+      method: "POST",
+      headers: { "Content-Type": contentType, "X-Altie-Key": n8nWebhookSecret.value() },
+      body: rawBody,
+      signal: AbortSignal.timeout(60_000),
     });
     const text = await upstream.text();
+    await writeOpsAudit({ action: "builder.run", auth: getAuthedUser(req), details: { status: upstream.status } });
     res.status(upstream.status);
     res.setHeader("content-type", upstream.headers.get("content-type") ?? "application/json");
-    try {
-      return res.send(JSON.stringify(JSON.parse(text)));
-    } catch {
-      return res.send(text);
-    }
+    return res.send(text);
   } catch (err) {
-    logger.error("n8n execution detail proxy failed", err);
-    return res.status(502).json({ message: "Failed to fetch execution detail from n8n." });
+    logger.error("builder run proxy failed", err);
+    return res.status(502).json({ message: "Failed to start the lesson workflow." });
   }
 });
+
+app.get("/api/n8n/executions", requireRoles(N8N_ROLES), (req, res) =>
+  proxyN8nExecutions(req, res, getAuthedUser(req)!.role)
+);
+
+app.get("/api/n8n/executions/:id", requireRoles(N8N_ROLES), (req, res) =>
+  proxyN8nExecutions(req, res, getAuthedUser(req)!.role, req.params.id)
+);
 
 app.options("/api/n8n/sales-executions", cors({
   origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
@@ -3089,7 +3138,11 @@ app.get("/api/voice/calls/:id/recording", requireRoles(SALES_N8N_ROLES), async (
       signal: AbortSignal.timeout(30_000),
     });
     if (!audio.ok || !audio.body) return res.status(502).json({ message: "Recording unavailable." });
-    res.setHeader("Content-Type", audio.headers.get("content-type") || "audio/mpeg");
+    // Served from the dashboard's origin: never let an upstream HTML/JS content type render here.
+    const audioType = audio.headers.get("content-type") || "audio/mpeg";
+    res.setHeader("Content-Type", /^audio\//i.test(audioType) ? audioType : "audio/mpeg");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
     res.setHeader("Cache-Control", "private, max-age=3600");
     return res.send(Buffer.from(await audio.arrayBuffer()));
   } catch (err) {
@@ -3403,7 +3456,9 @@ app.post("/api/meta/boost", requireRoles(META_WRITE_ROLES), async (req, res) => 
 // Meta calls this once when the webhook is set up in the app dashboard.
 app.get("/api/meta/webhook", (req, res) => {
   const expected = metaVerifyTokenSecret.value();
-  if (req.query["hub.mode"] === "subscribe" && expected && req.query["hub.verify_token"] === expected) {
+  const given = Buffer.from(String(req.query["hub.verify_token"] || ""));
+  const want = Buffer.from(expected || "");
+  if (req.query["hub.mode"] === "subscribe" && want.length > 0 && given.length === want.length && timingSafeEqual(given, want)) {
     return res.status(200).send(String(req.query["hub.challenge"] || ""));
   }
   return res.status(403).send("Forbidden");
@@ -3465,60 +3520,7 @@ app.get(/.*/, async (req, res) => {
     return res.status(403).json({ message: "Forbidden: insufficient role." });
   }
 
-  const { apiUrl, apiKey } = getN8nConfig();
-  if (!apiUrl || !apiKey) {
-    return res.status(500).json({ message: "n8n proxy not configured (missing api url/key)." });
-  }
-
-  const base = apiUrl.replace(/\/$/, "");
-  const id = m[1];
-
-  try {
-    if (!id) {
-      const takeRaw =
-        typeof req.query.limit === "string"
-          ? req.query.limit
-          : typeof req.query.take === "string"
-            ? req.query.take
-            : "10";
-      const takeNum = Number.parseInt(takeRaw, 10);
-      const take = Number.isFinite(takeNum) ? Math.min(Math.max(takeNum, 1), 100) : 10;
-
-      const workflowId =
-        typeof req.query.workflowId === "string"
-          ? req.query.workflowId
-          : typeof req.query.workflow === "string"
-            ? req.query.workflow
-            : undefined;
-      const workflowParam = workflowId ? `&workflowId=${encodeURIComponent(workflowId)}` : "";
-
-      const url = `${base}/api/v1/executions?limit=${encodeURIComponent(take)}${workflowParam}`;
-      const upstream = await fetch(url, { headers: { "X-N8N-API-KEY": apiKey } });
-      const text = await upstream.text();
-      res.status(upstream.status);
-      res.setHeader("content-type", upstream.headers.get("content-type") ?? "application/json");
-      try {
-        return res.send(JSON.stringify(JSON.parse(text)));
-      } catch {
-        return res.send(text);
-      }
-    }
-
-    const executionId = decodeURIComponent(id);
-    const url = `${base}/api/v1/executions/${encodeURIComponent(executionId)}?includeData=true`;
-    const upstream = await fetch(url, { headers: { "X-N8N-API-KEY": apiKey } });
-    const text = await upstream.text();
-    res.status(upstream.status);
-    res.setHeader("content-type", upstream.headers.get("content-type") ?? "application/json");
-    try {
-      return res.send(JSON.stringify(JSON.parse(text)));
-    } catch {
-      return res.send(text);
-    }
-  } catch (err) {
-    logger.error("n8n proxy fallback failed", err);
-    return res.status(502).json({ message: "Failed to proxy request to n8n." });
-  }
+  return proxyN8nExecutions(req, res, auth.role, m[1] ? decodeURIComponent(m[1]) : undefined);
 });
 
 export const api = onRequest(

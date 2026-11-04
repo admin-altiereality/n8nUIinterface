@@ -422,6 +422,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-app.listen(3001, () => {
+// Loopback only: this dev server has no auth and can send WhatsApp messages with the real Twilio account.
+app.listen(3001, '127.0.0.1', () => {
   console.log('Drive upload API listening on http://localhost:3001');
 });

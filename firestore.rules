@@ -60,9 +60,20 @@ service cloud.firestore {
     
     // Get user's role (safe - returns null if user doc missing)
     function getUserRole() {
-      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? 
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role : 
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) ?
+        roleIfApproved(get(/databases/$(database)/documents/users/$(request.auth.uid)).data) :
         null;
+    }
+
+    // Roles that grant access to other users' school data. Users can pick them at signup, so they
+    // only count once someone approved the account (no approvalStatus field = legacy, approved).
+    function isSchoolRole(role) {
+      return role in ['teacher', 'principal', 'school'];
+    }
+
+    function roleIfApproved(u) {
+      return (isSchoolRole(u.get('role', '')) && u.get('approvalStatus', 'approved') != 'approved') ?
+        null : u.get('role', null);
     }
     
     // Check if user can access school data (expression-only: no if/else in rules functions)
@@ -200,9 +211,9 @@ service cloud.firestore {
                       resource.data.school_id != null &&
                       isAuthenticated() &&
                       exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-                      ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'principal' && 
+                      ((getUserRole() == 'principal' &&
                         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.managed_school_id == resource.data.school_id) ||
-                       (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'school' && 
+                       (getUserRole() == 'school' &&
                         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.school_id == resource.data.school_id))) ||
                      // School admin/principal can read teachers in their school
                      // Use simplified helper function for better collection query performance
@@ -215,7 +226,15 @@ service cloud.firestore {
                       get(/databases/$(database)/documents/users/$(request.auth.uid)).data.class_ids != null &&
                       resource.data.managed_class_ids.hasAny(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.class_ids));
       
-      allow create: if isOwner(userId);
+      // Self-signup can't mint a staff role or pre-approve itself: role and approval are set by
+      // admins or the Admin SDK (the agents data-token bridge), which bypasses these rules.
+      // Teacher/principal/school signups must say approvalStatus 'pending' (a missing field reads as approved).
+      allow create: if isOwner(userId) &&
+        !(request.resource.data.get('role', '') in ['superadmin', 'admin', 'associate', 'partner', 'builder', 'salesperson', 'whatsapp_manager']) &&
+        (isSchoolRole(request.resource.data.get('role', ''))
+          ? request.resource.data.get('approvalStatus', '') == 'pending'
+          : (request.resource.data.get('approvalStatus', 'pending') == 'pending' ||
+             (request.resource.data.get('isGuest', false) == true && request.resource.data.approvalStatus == 'approved')));
       
       // Allow update if:
       // 1. User is updating their own document (but not approvalStatus or role), OR
@@ -225,9 +244,10 @@ service cloud.firestore {
       // 5. Teacher updating approvalStatus for students in their school (including pending students), OR
       // 6. School admin/principal updating approvalStatus for students in their school, OR
       // 7. School updating approvalStatus for teachers in their school
-      allow update: if (isOwner(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['approvalStatus', 'role'])) || 
+      // Owners can't edit the school/class fields the access checks trust without going back to 'pending'.
+      allow update: if (isOwner(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['approvalStatus', 'role', 'school_id', 'managed_school_id', 'managed_class_ids'])) ||
                        (isOwner(userId) && request.resource.data.approvalStatus == 'pending' && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])) ||
-                       (isOwner(userId) && request.resource.data.isGuest == true && request.resource.data.approvalStatus == 'approved' && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])) ||
+                       (isOwner(userId) && request.resource.data.isGuest == true && request.resource.data.approvalStatus == 'approved' && !isSchoolRole(resource.data.get('role', '')) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])) ||
                        isSuperadmin() ||
                        (isAdmin() && resource.data.role == 'school') ||
                        // Teacher can approve/reject students in their school (allows school_id update too)
@@ -359,7 +379,8 @@ service cloud.firestore {
     
     // System collections - only admins and service accounts
     match /system/{document=**} {
-      allow read, write: if isAdmin() || request.auth.token.firebase.sign_in_provider == 'google.com';
+      // Service accounts use the Admin SDK, which bypasses rules; any Google sign-in is not a service account.
+      allow read, write: if isAdmin();
     }
     
     // Curriculum Chapters collection - public read access, admin/superadmin write access

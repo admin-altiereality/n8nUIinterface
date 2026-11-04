@@ -189,7 +189,7 @@ function BoostDialog({
               <iframe
                 title="Ad preview"
                 srcDoc={result.previewHtml}
-                sandbox="allow-scripts allow-same-origin"
+                sandbox="allow-scripts"
                 className="h-[520px] w-full rounded-lg border border-zinc-800 bg-white"
               />
             )}
