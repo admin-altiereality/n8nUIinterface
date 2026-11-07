@@ -51,7 +51,7 @@ const FIELD_LABELS: Record<string, string> = {
   Demo_at: 'Demo',
 };
 
-const CONTACT_FIELDS = ['Principal Name', 'Email ID', 'Phone number', 'WhatsApp_number', 'City', 'XR_status', 'Status', 'Email_sent_at', 'Follow_up_count'];
+const CONTACT_FIELDS = ['Principal Name', 'Email ID', 'Phone number', 'WhatsApp_number', 'City', 'Board', 'Website', 'Fit_score', 'XR_status', 'Status', 'Email_sent_at', 'Follow_up_count'];
 
 /** ISO time → value for <input type="datetime-local"> in the browser's time zone. */
 function toLocalInput(iso: string): string {
