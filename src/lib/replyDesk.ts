@@ -32,6 +32,8 @@ const ESCALATE = /\b(lawyer|legal notice|legal action|harass\w*|complaint|report
 const OPT_OUT_INTENT = /stop|unsub|opt.?out|dnc/;
 const NO_INTENT = /negative|not.?interested|reject|no.?thanks/;
 const AUTO_INTENT = /auto.?reply|out.?of.?office|ooo/;
+/** Next steps Sales • Inbound (Plan Actions) writes on its own: a reminder to answer, not proof anyone did. */
+const AUTO_STEP = /^(book the demo they asked for|share pricing on|reply on|answer their|ask for the right contact$|revisit later$|read their|review their)/i;
 const ACTION_ORDER: ReplyAction[] = ['read', 'answer', 'opt_out', 'close', 'auto'];
 
 function confidenceOf(row: SchoolLeadRow): number | null {
@@ -58,7 +60,7 @@ function isAnswered(row: SchoolLeadRow, at: number | null): boolean {
   return (
     (at !== null && touched >= at) ||
     /warm reply sent/i.test(field(row, 'Reply_Status')) ||
-    Boolean(field(row, 'Next_step')) ||
+    (Boolean(field(row, 'Next_step')) && !AUTO_STEP.test(field(row, 'Next_step'))) ||
     (OPEN_STAGES.includes(stage) && stage !== 'Engaged')
   );
 }

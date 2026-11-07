@@ -35,6 +35,12 @@ describe('toReplyItem', () => {
     expect(toReplyItem(reply({ Next_step: 'Call Monday' }), NOW).open).toBe(false);
   });
 
+  it('does not count the next step Inbound sets by itself as an answer', () => {
+    expect(toReplyItem(reply({ Next_step: 'Answer their WhatsApp question' }), NOW).open).toBe(true);
+    expect(toReplyItem(reply({ Next_step: 'Share pricing on WhatsApp' }), NOW).open).toBe(true);
+    expect(toReplyItem(reply({ Next_step: 'See if they answered' }), NOW).open).toBe(false);
+  });
+
   it('reopens when they reply after our first touch', () => {
     expect(toReplyItem(reply({ First_touch_at: iso(NOW - 7_200_000) }), NOW).open).toBe(true);
   });
