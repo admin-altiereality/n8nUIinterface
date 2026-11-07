@@ -102,6 +102,11 @@ export type SchoolLeadRow = Record<string, unknown> & {
   Lead_form?: string;
   Leadgen_id?: string;
   Role?: string;
+  Board?: string;
+  Website?: string;
+  Fit_score?: string;
+  Mailbox?: string;
+  Bounce_reason?: string;
 };
 
 export type FetchLeadsResult = {
