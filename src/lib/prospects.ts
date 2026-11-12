@@ -109,9 +109,13 @@ export function optionsOf(rows: SchoolLeadRow[], key: string): string[] {
 
 const CSV_COLUMNS = ['School Name', 'Principal Name', 'Email ID', 'Phone number', 'City', 'Board', 'Website', 'Fit_score', 'Stage', 'Owner', 'Lead_id'];
 
-/** Quotes every cell, and neutralises anything a spreadsheet would run as a formula (scraped text is untrusted). */
+/**
+ * Quotes every cell, and neutralises anything a spreadsheet would run as a formula (scraped text is untrusted).
+ * Plain numbers like +91 98765 43210 are left alone so a dialer can still read them.
+ */
 function csvCell(value: string): string {
-  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  const formula = /^[=@\t\r]/.test(value) || (/^[+-]/.test(value) && !/^[+-][\d\s().-]*$/.test(value));
+  const safe = formula ? `'${value}` : value;
   return `"${safe.replace(/"/g, '""')}"`;
 }
 

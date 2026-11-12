@@ -4,7 +4,7 @@
  */
 import type { SchoolLeadRow } from '../api/sheetsClient';
 import { hasReplied } from './leadInsights';
-import { OPEN_STAGES, bookingLink, field, isDoNotContact, stageOf, timeOf, whatsappWindowLeftMs } from './pipeline';
+import { bookingLink, field, isDoNotContact, stageOf, timeOf, whatsappWindowLeftMs } from './pipeline';
 
 /** answer: draft ready. read: a person decides. close: they said no. opt_out: never reply. auto: nothing to do. */
 export type ReplyAction = 'answer' | 'read' | 'close' | 'opt_out' | 'auto';
@@ -32,8 +32,11 @@ const ESCALATE = /\b(lawyer|legal notice|legal action|harass\w*|complaint|report
 const OPT_OUT_INTENT = /stop|unsub|opt.?out|dnc/;
 const NO_INTENT = /negative|not.?interested|reject|no.?thanks/;
 const AUTO_INTENT = /auto.?reply|out.?of.?office|ooo/;
-/** Next steps Sales • Inbound (Plan Actions) writes on its own: a reminder to answer, not proof anyone did. */
-const AUTO_STEP = /^(book the demo they asked for|share pricing on|reply on|answer their|ask for the right contact$|revisit later$|read their|review their)/i;
+/**
+ * Next steps Sales • Inbound (Plan Actions) writes on its own: a reminder to answer, not proof anyone did.
+ * It starts them with "Auto: "; the plain wordings are rows written before that tag existed.
+ */
+const AUTO_STEP = /^(auto: |book the demo they asked for|share pricing on|reply on|answer their|ask for the right contact$|revisit later$|read their|review their)/i;
 const ACTION_ORDER: ReplyAction[] = ['read', 'answer', 'opt_out', 'close', 'auto'];
 
 function confidenceOf(row: SchoolLeadRow): number | null {
@@ -56,12 +59,10 @@ export function classifyReply(text: string, intent: string, confidence: number |
 
 function isAnswered(row: SchoolLeadRow, at: number | null): boolean {
   const touched = Math.max(timeOf(row, 'First_touch_at') ?? 0, timeOf(row, 'Warm_reply_at') ?? 0);
-  const stage = stageOf(row);
   return (
     (at !== null && touched >= at) ||
     /warm reply sent/i.test(field(row, 'Reply_Status')) ||
-    (Boolean(field(row, 'Next_step')) && !AUTO_STEP.test(field(row, 'Next_step'))) ||
-    (OPEN_STAGES.includes(stage) && stage !== 'Engaged')
+    (Boolean(field(row, 'Next_step')) && !AUTO_STEP.test(field(row, 'Next_step')))
   );
 }
 

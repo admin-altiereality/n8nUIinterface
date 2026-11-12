@@ -1,6 +1,6 @@
 /**
  * Twilio Programmable Messaging:
- * - Local dev: Express in `src/index.js` → `http://localhost:3001/twilio/*` (or `VITE_UPLOAD_API_URL`)
+ * - Local dev: the deployed API, via `VITE_API_PROXY_URL` → `{proxy}/api/twilio/*`
  * - Production + Firebase Hosting preview: same-origin `/api/twilio/*` (Hosting rewrites to Cloud Function `api`)
  *
  * All `/api/twilio/*` calls require a Firebase Auth Bearer token (except StatusCallback).
@@ -24,9 +24,7 @@ function getTwilioRoot(): string {
     return `${proxy!.replace(/\/$/, '')}/api/twilio`;
   }
 
-  const upload =
-    (import.meta.env.VITE_UPLOAD_API_URL as string | undefined) || 'http://localhost:3001';
-  return `${upload.replace(/\/$/, '')}/twilio`;
+  throw new Error('Twilio API unavailable in local dev without VITE_API_PROXY_URL.');
 }
 
 function twilioUrl(pathAndQuery: string): string {

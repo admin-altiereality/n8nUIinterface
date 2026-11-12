@@ -66,4 +66,10 @@ describe('cohortCsv', () => {
     expect(csv).toContain('"Jai""pur"');
     expect(csv.split('\r\n')).toHaveLength(2);
   });
+
+  it('leaves plain phone numbers readable but still blocks +/- formulas', () => {
+    const csv = cohortCsv([school({ 'Phone number': '+91 98765 43210', 'Principal Name': '+cmd|calc' })]);
+    expect(csv).toContain('"+91 98765 43210"');
+    expect(csv).toContain(`"'+cmd|calc"`);
+  });
 });

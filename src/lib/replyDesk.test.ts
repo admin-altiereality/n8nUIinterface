@@ -39,6 +39,12 @@ describe('toReplyItem', () => {
     expect(toReplyItem(reply({ Next_step: 'Answer their WhatsApp question' }), NOW).open).toBe(true);
     expect(toReplyItem(reply({ Next_step: 'Share pricing on WhatsApp' }), NOW).open).toBe(true);
     expect(toReplyItem(reply({ Next_step: 'See if they answered' }), NOW).open).toBe(false);
+    expect(toReplyItem(reply({ Next_step: 'Auto: Reply on WhatsApp' }), NOW).open).toBe(true);
+  });
+
+  it('stays open for a lead in a late stage until the reply is answered', () => {
+    expect(toReplyItem(reply({ Stage: 'Proposal' }), NOW).open).toBe(true);
+    expect(toReplyItem(reply({ Stage: 'Demo booked' }), NOW).open).toBe(true);
   });
 
   it('reopens when they reply after our first touch', () => {
