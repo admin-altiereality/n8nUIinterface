@@ -3494,19 +3494,6 @@ app.get(/.*/, async (req, res) => {
     return res.status(404).send(`Cannot GET ${req.path}`);
   }
 
-  const salesMatch = originalUrl.match(/n8n\/sales-executions(?:\/([^/?#]+))?/);
-  if (salesMatch) {
-    const auth = await authenticateRequest(req);
-    if ("error" in auth) {
-      return res.status(auth.status).json({ message: auth.error });
-    }
-    if (!SALES_N8N_ROLES.has(auth.role)) {
-      return res.status(403).json({ message: "Forbidden: insufficient role." });
-    }
-    // Re-route conceptually: callers should hit explicit routes; keep 404 for odd paths
-    return res.status(404).json({ message: "Use /api/n8n/sales-executions" });
-  }
-
   const m = originalUrl.match(/n8n\/executions(?:\/([^/?#]+))?/);
   if (!m) {
     return res.status(404).send(`Cannot GET ${req.path}`);

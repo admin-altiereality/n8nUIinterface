@@ -164,6 +164,7 @@ export default function PipelinePage() {
                         {field(row, 'City') || '—'}
                         {owner && ` · ${owner === me ? 'you' : ownerLabel(owner)}`}
                         {dealValue(row) > 0 && ` · ${formatInr(dealValue(row))}`}
+                        {field(row, 'Fit_score') && ` · Fit ${field(row, 'Fit_score')}`}
                         {!partner && leadSource(row) !== 'cold_email' && ` · ${SOURCE_LABELS[leadSource(row)]}`}
                       </p>
                       {field(row, 'Next_step') && (

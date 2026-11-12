@@ -4,6 +4,8 @@ import LessonBuilderPage from './pages/LessonBuilderPage';
 import SalesFunnelPage from './pages/SalesFunnelPage';
 import SalesHomePage from './pages/SalesHomePage';
 import PipelinePage from './pages/PipelinePage';
+import RepliesPage from './pages/RepliesPage';
+import ProspectsPage from './pages/ProspectsPage';
 import TwilioMessagingPage from './pages/TwilioMessagingPage';
 import OpsDashboardPage from './pages/OpsDashboardPage';
 import LeadTimelinePage from './pages/LeadTimelinePage';
@@ -71,6 +73,26 @@ const App: React.FC = () => {
             <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
               <AppLayout>
                 <PipelinePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/replies"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <RepliesPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/prospects"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <ProspectsPage />
               </AppLayout>
             </ProtectedRoute>
           }

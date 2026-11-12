@@ -21,6 +21,8 @@ import {
   BookOpen,
   IndianRupee,
   PhoneCall,
+  Reply,
+  ListFilter,
 } from 'lucide-react';
 
 interface NavItem {
@@ -44,9 +46,21 @@ const NAV_ITEMS: NavItem[] = [
     roles: ['superadmin', 'associate', 'salesperson'],
   },
   {
+    label: 'Reply Desk',
+    path: '/replies',
+    icon: <Reply className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
     label: 'Pipeline',
     path: '/pipeline',
     icon: <Columns3 className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Prospects',
+    path: '/prospects',
+    icon: <ListFilter className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'salesperson'],
   },
   {

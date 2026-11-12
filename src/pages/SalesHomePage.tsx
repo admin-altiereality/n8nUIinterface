@@ -6,6 +6,7 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { LeadDrawer } from '../components/sales/LeadDrawer';
 import { ChannelRoiTable } from '../components/sales/ChannelRoiTable';
+import { SendHealthPanel } from '../components/sales/SendHealthPanel';
 import { useAuth } from '../context/AuthContext';
 import { fetchMetaOverview } from '../api/opsClient';
 import { leadPhoneForMessaging, type SchoolLeadRow } from '../api/sheetsClient';
@@ -27,6 +28,7 @@ import {
   tomorrowMorning,
   type QueueItem,
 } from '../lib/pipeline';
+import { listReplies } from '../lib/replyDesk';
 import { useLeadUpdate } from '../lib/useLeadUpdate';
 import { useSheetLeads } from '../lib/useSheetLeads';
 import { useAppSettings } from '../lib/useAppSettings';
@@ -87,6 +89,7 @@ export default function SalesHomePage() {
   const spendInr = (metaSpend ?? 0) + otherSpend;
   const kpis = useMemo(() => salesKpis(leads, { now, targetInr, spendInr }), [leads, now, targetInr, spendInr]);
   const funnel = useMemo(() => funnelConversion(leads), [leads]);
+  const repliesWaiting = useMemo(() => listReplies(allLeads, now).filter((r) => r.open).length, [allLeads, now]);
   const queueSize = QUEUE_SECTIONS.reduce((n, s) => n + queue[s.key].length, 0);
 
   const leadParam = searchParams.get('lead');
@@ -233,6 +236,15 @@ export default function SalesHomePage() {
         </div>
       )}
 
+      {repliesWaiting > 0 && (
+        <Link
+          to="/replies"
+          className="mb-4 block rounded-md border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-[11px] text-indigo-200 hover:bg-indigo-500/20"
+        >
+          {repliesWaiting} {repliesWaiting === 1 ? 'reply is' : 'replies are'} waiting for an answer. Open the Reply Desk →
+        </Link>
+      )}
+
       <div className="mb-4 flex flex-wrap items-center gap-1.5 text-[11px]">
         {(['all', ...SOURCES] as const).map((key) => {
           const count = key === 'all' ? allLeads.length : sourceCounts[key] || 0;
@@ -299,6 +311,8 @@ export default function SalesHomePage() {
           })}
         </div>
       </div>
+
+      <SendHealthPanel leads={allLeads} now={now} />
 
       <ChannelRoiTable leads={allLeads} settings={settings} canSeeAds={canSeeAds} />
 

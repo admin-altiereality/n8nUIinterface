@@ -112,8 +112,10 @@ Every webhook needs the `X-Altie-Key` header (n8n credential "Altie Function Key
 
 | Page | For | What it does |
 |---|---|---|
-| Sales Home `/sales` | sales | Today queue and KPIs. Source chips (Instagram ad, Facebook ad, website, WhatsApp, cold email) narrow everything. The **Channels** table shows leads → engaged → demos → won and cost per lead, demo and deal for each source. |
+| Sales Home `/sales` | sales | Today queue, KPIs, 14-day activity and 30-day email health (bounce, open and reply rates per mailbox). Source chips (Instagram ad, Facebook ad, website, WhatsApp, cold email) narrow everything. The **Channels** table shows leads → engaged → demos → won and cost per lead, demo and deal for each source. |
 | Pipeline `/pipeline` | sales | Every school by stage, with a source filter and source badges. |
+| Reply Desk `/replies` | sales | Every recorded reply, sorted by what needs a person: opt-outs, complaints and unsure classifications get no draft; the rest get a draft to edit, checked for unfilled placeholders, pricing words, filler and length. Nothing sends from this page. **Reads only what is in the sheet, so cold-email replies appear only once something writes them there.** |
+| Prospects `/prospects` | sales | Filter schools by city, board, status, stage, fit and more, best fit first; shows why each was or wasn't contacted; CSV export (recorded in the audit log). |
 | School `/schools/:orgKey` | sales | Every contact at a school and one timeline: city run or form, emails, opens, clicks, replies, WhatsApp both ways, notes, stage changes, demo, proposal, won/lost, unsubscribe. The lead drawer links to it. |
 | Social Ads `/social` | superadmin, associate | Meta ad numbers, live or as the daily snapshot Claude pulls through the Meta Ads MCP. |
 | Admin `/admin` | superadmin | Health of the 4 workflows (manual editor runs don't count), cold emails today vs. the cap, WhatsApp failures, approved templates, Meta mode. **Settings:** monthly target, monthly cost per channel, email cap and follow-up share, test/live for auto-replies and the WhatsApp welcome, Meta budget ceiling, alert recipients. |
