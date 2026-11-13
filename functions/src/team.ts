@@ -221,3 +221,46 @@ export function slaAlert(breaches: SlaBreach[]): { title: string; text: string }
     text: ["These schools showed interest and nobody has called or messaged them yet:", "", ...lines].join("\n"),
   };
 }
+
+export type OverdueStep = { leadId: string; school: string; owner: string; nextStep: string; dueAt: string; overdueMs: number };
+
+/**
+ * Open leads whose next step is at least one business hour past due. Unlike slaBreaches this keeps going after the
+ * first call or message, so a lead touched once is not forgotten. Most recently due first.
+ */
+export function overdueSteps(rows: Row[], now = Date.now()): OverdueStep[] {
+  const out: OverdueStep[] = [];
+  for (const row of rows) {
+    const nextStep = str(row, "Next_step");
+    const due = time(row, "Next_step_due");
+    if (!nextStep || due === null) continue;
+    if (str(row, "Do_not_contact") || ["Lost", "Won"].includes(str(row, "Stage"))) continue;
+    if (/^zz test/i.test(str(row, "School Name"))) continue;
+    const overdueMs = businessMs(due, now);
+    if (overdueMs < HOUR) continue;
+    out.push({
+      leadId: str(row, "Lead_id"),
+      school: str(row, "School Name") || "Unknown school",
+      owner: str(row, "Owner").toLowerCase(),
+      nextStep,
+      dueAt: new Date(due).toISOString(),
+      overdueMs,
+    });
+  }
+  return out.sort((a, b) => Date.parse(b.dueAt) - Date.parse(a.dueAt));
+}
+
+/** The twice-daily email listing every overdue next step. */
+export function overdueAlert(steps: OverdueStep[], max = 40): { title: string; text: string } {
+  const lines = steps
+    .slice(0, max)
+    .map(
+      (s) =>
+        `- ${s.school}: ${s.nextStep} (overdue ${hours(s.overdueMs)}, ${s.owner ? `owner ${name(s.owner)}` : "unclaimed"})\n  https://agents.altiereality.com/sales?lead=${encodeURIComponent(s.leadId)}`
+    );
+  if (steps.length > max) lines.push(`…and ${steps.length - max} more on the dashboard.`);
+  return {
+    title: `${steps.length} follow-up(s) overdue`,
+    text: ["Each lead below has a next step that is past due. Do it, or set a new next step and date:", "", ...lines].join("\n"),
+  };
+}

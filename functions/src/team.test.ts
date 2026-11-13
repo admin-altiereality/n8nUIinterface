@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { businessMs, leaderboard, slaAlert, slaBreaches, weeklyDigest } from './team';
+import { businessMs, leaderboard, overdueAlert, overdueSteps, slaAlert, slaBreaches, weeklyDigest } from './team';
 
 const HOUR = 3_600_000;
 // Times written in IST for readability.
@@ -36,6 +36,29 @@ describe('slaBreaches', () => {
     ]);
     expect(breaches[1].owner).toBe('bda@x.com');
     expect(slaAlert(breaches).title).toBe('2 hot lead(s) not contacted yet (1 over 4 h)');
+  });
+});
+
+describe('overdueSteps', () => {
+  const now = ist('2026-10-02T16:00:00');
+  it('lists open leads past due by a business hour, touched or not, newest due first', () => {
+    const rows = [
+      { Lead_id: 'a', 'School Name': 'A', Next_step: 'Call channel partner lead', Next_step_due: '2026-09-25T09:00:00+05:30', First_touch_at: '2026-09-25T10:00:00+05:30', Owner: 'Bda@x.com' },
+      { Lead_id: 'b', 'School Name': 'B', Next_step: 'Send proposal', Next_step_due: '2026-10-02T14:00:00+05:30' },
+      { Lead_id: 'c', 'School Name': 'C', Next_step: 'Call back', Next_step_due: '2026-10-02T15:30:00+05:30' },
+      { Lead_id: 'd', 'School Name': 'D', Next_step: 'Call back', Next_step_due: '2026-10-05T11:00:00+05:30' },
+      { Lead_id: 'e', 'School Name': 'E', Next_step: 'Call back', Next_step_due: '2026-09-01T11:00:00+05:30', Stage: 'Lost' },
+      { Lead_id: 'f', 'School Name': 'F', Next_step: 'Call back', Next_step_due: '2026-09-01T11:00:00+05:30', Do_not_contact: 'manual:x' },
+      { Lead_id: 'g', 'School Name': 'ZZ Test', Next_step: 'Call back', Next_step_due: '2026-09-01T11:00:00+05:30' },
+      { Lead_id: 'h', 'School Name': 'H', Next_step: '', Next_step_due: '2026-09-01T11:00:00+05:30' },
+    ];
+    const steps = overdueSteps(rows, now);
+    expect(steps.map((s) => s.leadId)).toEqual(['b', 'a']);
+    expect(steps[1].owner).toBe('bda@x.com');
+    const alert = overdueAlert(steps);
+    expect(alert.title).toBe('2 follow-up(s) overdue');
+    expect(alert.text).toContain('A: Call channel partner lead');
+    expect(overdueAlert(steps, 1).text).toContain('…and 1 more');
   });
 });
 

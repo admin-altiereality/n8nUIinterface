@@ -35,7 +35,7 @@ import {
   suggestProductSchools,
   type ProductSchool,
 } from "./customers";
-import { CALL_OUTCOMES, leaderboard, slaAlert, slaBreaches, weeklyDigest } from "./team";
+import { CALL_OUTCOMES, leaderboard, overdueAlert, overdueSteps, slaAlert, slaBreaches, weeklyDigest } from "./team";
 import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefaults, type AppSettings } from "./settings";
 import { PRICING_DOC, agentPricingText, cleanPricing, pricingSheetRows, withPricingDefaults } from "./pricing";
 import { VOICE_CALLS, voiceCallFromExecution, voiceTotals, type VoiceCall } from "./voice";
@@ -2965,6 +2965,19 @@ app.post("/api/internal/sla-check", async (req, res) => {
     if (alerted) await Promise.all(fresh.map((f) => f.ref.set({ lastSentAt: new Date().toISOString(), level: f.b.level })));
   }
   return res.json({ breaches: breaches.length, newlyAlerted: alerted ? fresh.length : 0 });
+});
+
+/** n8n calls this at 10:00 and 16:00 IST, Mon–Sat: one email listing every overdue next step. */
+app.post("/api/internal/overdue-check", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const { rows } = await fetchSheetLeadRows({ limit: "5000", fresh: "1" });
+  const steps = overdueSteps(rows);
+  let sent = false;
+  if (steps.length && req.query.dry !== "1") {
+    const { title, text } = overdueAlert(steps);
+    sent = await postAlert(title, text);
+  }
+  return res.json({ overdue: steps.length, sent });
 });
 
 /** n8n calls this on Monday mornings. */
