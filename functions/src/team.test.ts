@@ -19,11 +19,12 @@ describe('businessMs', () => {
 
 describe('slaBreaches', () => {
   const now = ist('2026-10-02T16:00:00');
-  it('reminds the owner after 1 h and the manager after 4 h, skipping touched, closed and test leads', () => {
+  it('reminds the owner after 15 min and the manager after 4 h, skipping touched, closed and test leads', () => {
     const rows = [
       { Lead_id: 'a', 'School Name': 'A', Owner: 'Bda@x.com', Hot_at: '2026-10-02T14:30:00+05:30' },
       { Lead_id: 'b', 'School Name': 'B', Hot_at: '2026-10-02T10:30:00+05:30' },
-      { Lead_id: 'c', 'School Name': 'C', Hot_at: '2026-10-02T15:30:00+05:30' },
+      { Lead_id: 'c', 'School Name': 'C', Hot_at: '2026-10-02T15:50:00+05:30' },
+      { Lead_id: 'h', 'School Name': 'H', Hot_at: '2026-10-02T15:40:00+05:30' },
       { Lead_id: 'd', 'School Name': 'D', Hot_at: '2026-10-02T10:00:00+05:30', First_touch_at: '2026-10-02T11:00:00+05:30' },
       { Lead_id: 'e', 'School Name': 'E', Hot_at: '2026-10-02T10:00:00+05:30', Stage: 'Lost' },
       { Lead_id: 'f', 'School Name': 'ZZ Test', Hot_at: '2026-10-02T10:00:00+05:30' },
@@ -33,9 +34,10 @@ describe('slaBreaches', () => {
     expect(breaches.map((b) => [b.leadId, b.level])).toEqual([
       ['b', 'manager'],
       ['a', 'owner'],
+      ['h', 'owner'],
     ]);
     expect(breaches[1].owner).toBe('bda@x.com');
-    expect(slaAlert(breaches).title).toBe('2 hot lead(s) not contacted yet (1 over 4 h)');
+    expect(slaAlert(breaches).title).toBe('3 hot lead(s) not contacted yet (1 over 4 h)');
   });
 });
 

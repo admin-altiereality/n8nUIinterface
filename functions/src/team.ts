@@ -40,8 +40,8 @@ export function businessMs(from: number, to: number): number {
 export type SlaBreach = { leadId: string; school: string; owner: string; level: "owner" | "manager"; waitingMs: number; hotAt: string };
 
 /**
- * Hot leads nobody has called or messaged yet. Past 1 business hour the owner is reminded; past 4 the manager is
- * told. Leads that are Do-not-contact, Lost or Won are left out.
+ * Hot leads nobody has called or messaged yet. Past 15 business minutes the owner is reminded; past 4 hours the
+ * manager is told. Leads that are Do-not-contact, Lost or Won are left out.
  */
 export function slaBreaches(rows: Row[], now = Date.now()): SlaBreach[] {
   const out: SlaBreach[] = [];
@@ -51,7 +51,7 @@ export function slaBreaches(rows: Row[], now = Date.now()): SlaBreach[] {
     if (str(row, "Do_not_contact") || ["Lost", "Won"].includes(str(row, "Stage"))) continue;
     if (/^zz test/i.test(str(row, "School Name"))) continue;
     const waitingMs = businessMs(hotAt, now);
-    if (waitingMs < HOUR) continue;
+    if (waitingMs < HOUR / 4) continue;
     out.push({
       leadId: str(row, "Lead_id"),
       school: str(row, "School Name") || "Unknown school",
