@@ -243,3 +243,21 @@ contacts, and its Outbox / Contacts / Usage / Activity views. Sending stays on n
   uid; a reschedule marks the old uid "rescheduled").
 - **Meetings `/meetings`** lists upcoming, past and cancelled demos with a Join link, matched to a lead by lead ID or
   else by email. `GET /api/sales/bookings` returns the last 60 days and everything upcoming.
+- **Around each demo (WhatsApp, automatic).** Sales • Demo Bookings calls `POST /api/internal/booking-reminders` every
+  5 minutes; `dueMessage` in `functions/src/bookings.ts` picks the one message a booking is due and `notified` on the
+  booking doc records it, so nothing is sent twice:
+
+  | When | Template | Notes |
+  |---|---|---|
+  | on booking (more than 30 min ahead) | `lxr_demo_confirm_en` | time and join link |
+  | 24 to 20 hours before | `lxr_demo_reminder_day_en` | skipped if booked later than that |
+  | 20 to 3 minutes before | `lxr_demo_reminder_15m_en` | join link |
+  | marked no-show | `lxr_demo_noshow_en` | rebooking link with the lead id; once more next working morning unless they rebooked |
+  | marked done | `lxr_demo_followup_en` | lead moves to Demo done, next step "Send the proposal" |
+
+  Variables: `{{1}}` first name, `{{2}}` time in IST, `{{3}}` link. The phone comes from the booking form, else the
+  lead's row; no phone means no message (shown as "no phone" on the Meetings page). A template Meta hasn't approved
+  yet is retried every tick.
+- **Outcome.** cal.com's "guest didn't join Cal Video" event marks a no-show and its "meeting ended" event marks a
+  Cal Video demo done; both only work when the demo runs on Cal Video. For Google Meet, use the **Done** / **No-show**
+  buttons on the Meetings page (`POST /api/sales/bookings/:uid/outcome`). A no-show also emails the reps.
