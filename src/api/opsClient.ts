@@ -639,6 +639,10 @@ export type DemoBooking = {
   meetUrl: string;
   title: string;
   updatedAt: string;
+  phone?: string;
+  outcome?: '' | 'done' | 'no_show';
+  /** Message key (confirm, day, min15, noshow1, noshow2, followup) -> time sent, or why it was skipped. */
+  notified?: Record<string, string>;
 };
 
 /** cal.com bookings from the last 60 days and all upcoming ones, earliest first. */
@@ -647,4 +651,15 @@ export async function fetchBookings(): Promise<DemoBooking[]> {
   if (!res.ok) await parseError(res, 'Could not load meetings.');
   const json = (await res.json()) as { bookings?: DemoBooking[] };
   return Array.isArray(json.bookings) ? json.bookings : [];
+}
+
+/** Marks a demo done or a no-show; the lead moves on and the matching WhatsApp goes out within 5 minutes. */
+export async function setBookingOutcome(uid: string, outcome: 'done' | 'no_show'): Promise<DemoBooking> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/sales/bookings/${encodeURIComponent(uid)}/outcome`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ outcome }),
+  });
+  if (!res.ok) await parseError(res, 'Could not update the meeting.');
+  return ((await res.json()) as { booking: DemoBooking }).booking;
 }

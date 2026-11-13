@@ -40,7 +40,7 @@ import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefau
 import { PRICING_DOC, agentPricingText, cleanPricing, pricingSheetRows, withPricingDefaults } from "./pricing";
 import { VOICE_CALLS, voiceCallFromExecution, voiceTotals, type VoiceCall } from "./voice";
 import { parseRunLog } from "./runLog";
-import { DEMO_BOOKINGS, parseBookingEvent } from "./bookings";
+import { DEMO_BOOKINGS, MESSAGE_TEMPLATES, dueMessage, isCalVideo, messageVariables, parseBookingEvent, parseOutcomeEvent, type DemoBooking } from "./bookings";
 
 setGlobalOptions({ maxInstances: 10 });
 
@@ -3019,9 +3019,54 @@ app.get("/api/sales/run-log", requireRoles(SALES_N8N_ROLES), async (req, res) =>
   }
 });
 
-/** Sales • Demo Bookings forwards each cal.com booking event here (X-Altie-Key); one doc per booking uid. */
+/** The lead a booking belongs to: the id its link carried, else the one open lead with the attendee's email. */
+function bookingLeadId(b: DemoBooking, rows: Array<Record<string, unknown>>): string {
+  if (b.leadId) return b.leadId;
+  if (!b.email) return "";
+  const hits = rows.filter((r) => safeText(r["Email ID"]).toLowerCase() === b.email && safeText(r.Lead_id) && !["Won", "Lost"].includes(safeText(r.Stage)));
+  return hits.length === 1 ? safeText(hits[0].Lead_id) : "";
+}
+
+/** Records how a demo went, moves the lead on and tells the reps. The next reminder tick sends the WhatsApp. */
+async function setBookingOutcome(uid: string, outcome: "done" | "no_show", actor: { email?: string; role?: string }): Promise<DemoBooking | null> {
+  const ref = getDataProjectDb().collection(DEMO_BOOKINGS).doc(uid);
+  const snap = await ref.get();
+  const b = snap.exists ? (snap.data() as DemoBooking) : null;
+  if (!b || b.status !== "booked") return null;
+  if (b.outcome === outcome) return b;
+  const now = new Date().toISOString();
+  await ref.set({ outcome, updatedAt: now }, { merge: true });
+  const { rows } = await fetchSheetLeadRows({ limit: "5000" });
+  const leadId = bookingLeadId(b, rows);
+  if (leadId) {
+    const fields: Record<string, string> =
+      outcome === "done"
+        ? { Stage: "Demo done", Demo_done_at: now, Next_step: "Send the proposal", Next_step_due: new Date(Date.now() + 86_400_000).toISOString() }
+        : { Next_step: "Rebook the demo (they missed it)", Next_step_due: now };
+    await updateLeadInSheet(leadId, fields, actor);
+  }
+  if (outcome === "no_show") {
+    await postAlert(`No-show: ${b.name || b.email || "a guest"} missed the demo`, [
+      `${b.name || "Guest"} (${b.email || "no email"}) did not join the demo booked for ${messageVariables("confirm", b)[2]}.`,
+      b.phone ? "They get a WhatsApp with a rebooking link now, and one more nudge tomorrow morning." : "No phone number on the booking, so no WhatsApp can be sent. Call or email them.",
+      "Meetings: https://agents.altiereality.com/meetings",
+    ].join("\n\n"));
+  }
+  return { ...b, outcome };
+}
+
+/** Sales • Demo Bookings forwards every cal.com event here (X-Altie-Key); one doc per booking uid. */
 app.post("/api/internal/bookings", async (req, res) => {
   if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const outcome = parseOutcomeEvent(req.body);
+  if (outcome) {
+    const snap = await getDataProjectDb().collection(DEMO_BOOKINGS).doc(outcome.uid).get();
+    const b = snap.exists ? (snap.data() as DemoBooking) : null;
+    // A meeting "ends" on schedule whether or not anyone came, so only Cal Video (which reports no-shows) counts as done.
+    if (b && outcome.kind === "ended" && (b.outcome || !isCalVideo(b))) return res.json({ ok: true, ignored: true });
+    const saved = await setBookingOutcome(outcome.uid, outcome.kind === "ended" ? "done" : "no_show", { email: "cal.com", role: "system" });
+    return res.json({ ok: true, outcome: saved?.outcome || null });
+  }
   const parsed = parseBookingEvent(req.body);
   if (parsed === null) return res.json({ ok: true, ignored: true });
   if (typeof parsed === "string") return res.status(400).json({ message: parsed });
@@ -3031,6 +3076,55 @@ app.post("/api/internal/bookings", async (req, res) => {
     await col.doc(parsed.replaces).set({ uid: parsed.replaces, status: "rescheduled", updatedAt: parsed.booking.updatedAt }, { merge: true });
   }
   return res.json({ ok: true });
+});
+
+/**
+ * n8n calls this every 5 minutes: sends each booking the one WhatsApp it is due (confirmation, day-before and
+ * 15-minute reminders, no-show rebooking, after-demo follow-up) and records it so nothing is sent twice.
+ */
+app.post("/api/internal/booking-reminders", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const now = Date.now();
+  const col = getDataProjectDb().collection(DEMO_BOOKINGS);
+  const snap = await col.where("startTime", ">=", new Date(now - 3 * 86_400_000).toISOString()).limit(500).get();
+  const bookings = snap.docs.map((d) => d.data() as DemoBooking);
+  const upcoming = (b: DemoBooking) => b.status === "booked" && !b.outcome && Date.parse(b.startTime) > now;
+  let rows: Array<Record<string, unknown>> | null = null;
+  const results: Array<{ uid: string; key: string; result: string }> = [];
+  for (const b of bookings) {
+    const rebooked = bookings.some((o) => o.uid !== b.uid && upcoming(o) && ((b.email && o.email === b.email) || (b.leadId && o.leadId === b.leadId)));
+    const key = dueMessage(b, now, rebooked);
+    if (!key) continue;
+    let phone = b.phone;
+    if (!phone) {
+      rows = rows || (await fetchSheetLeadRows({ limit: "5000" })).rows;
+      const leadId = bookingLeadId(b, rows);
+      const lead = leadId ? rows.find((r) => safeText(r.Lead_id) === leadId) : null;
+      phone = lead ? safeText(lead.WhatsApp_number) || safeText(lead["Phone number"]) : "";
+    }
+    let result: string;
+    if (!phone) result = "no_phone";
+    else {
+      const sent = await sendLxrTemplate(phone, MESSAGE_TEMPLATES[key], messageVariables(key, b));
+      // Opt-outs and unusable numbers are final; anything else (template not approved yet, Twilio down) is retried next tick.
+      result = sent.status === 200 ? new Date().toISOString() : sent.status === 409 ? "opted_out" : sent.status === 400 ? "bad_phone" : "";
+      if (!result) logger.warn("booking reminder not sent", { uid: b.uid, key, status: sent.status, message: sent.message });
+    }
+    if (result) await col.doc(b.uid).set({ notified: { [key]: result } }, { merge: true });
+    results.push({ uid: b.uid, key, result: result || "retry" });
+  }
+  return res.json({ ok: true, checked: bookings.length, results });
+});
+
+/** The Meetings page buttons: mark a demo done or a no-show by hand (Google Meet can't tell us). */
+app.post("/api/sales/bookings/:uid/outcome", requireRoles(SALES_N8N_ROLES), async (req, res) => {
+  const outcome = req.body?.outcome === "done" || req.body?.outcome === "no_show" ? req.body.outcome : null;
+  if (!outcome || !/^[A-Za-z0-9_-]{6,64}$/.test(req.params.uid)) return res.status(400).json({ message: "outcome must be done or no_show." });
+  const auth = getAuthedUser(req);
+  const saved = await setBookingOutcome(req.params.uid, outcome, { email: auth?.email || undefined, role: auth?.role || undefined });
+  if (!saved) return res.status(404).json({ message: "No booked meeting with that id." });
+  await writeOpsAudit({ action: "booking.outcome", auth, targetId: req.params.uid, details: { outcome } });
+  return res.json({ ok: true, booking: saved });
 });
 
 app.get("/api/sales/bookings", requireRoles(SALES_N8N_ROLES), async (_req, res) => {
@@ -3219,19 +3313,17 @@ app.get("/api/voice/calls/:id/recording", requireRoles(SALES_N8N_ROLES), async (
  * n8n sends an approved LearnXR template (lxr_* only) during or after an AI call (X-Altie-Key). Numbers that replied
  * STOP stay blocked. Variables: {{1}} first name, {{2}} sender name, {{3}} link/date when the template needs it.
  */
-app.post("/api/internal/whatsapp-template", async (req, res) => {
-  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+async function sendLxrTemplate(toRaw: unknown, nameRaw: unknown, given: Record<string, unknown>): Promise<{ status: number; message?: string; sid?: unknown }> {
   const t = getTwilioConfig();
-  if (!t.ok) return res.status(503).json({ message: "Twilio is not configured." });
-  const to = leadKeyFromPhone(req.body?.to);
-  const name = safeText(req.body?.templateName);
-  if (!isValidWhatsAppRecipient(to)) return res.status(400).json({ message: "Invalid recipient." });
-  if (!/^lxr_[a-z0-9_]+_(en|hi)$/.test(name)) return res.status(400).json({ message: "Only lxr_* templates can be sent this way." });
+  if (!t.ok) return { status: 503, message: "Twilio is not configured." };
+  const to = leadKeyFromPhone(toRaw);
+  const name = safeText(nameRaw);
+  if (!isValidWhatsAppRecipient(to)) return { status: 400, message: "Invalid recipient." };
+  if (!/^lxr_[a-z0-9_]+_(en|hi)$/.test(name)) return { status: 400, message: "Only lxr_* templates can be sent this way." };
   const optOut = await getDataProjectDb().collection(WHATSAPP_OPT_OUTS_COLLECTION).doc(to).get();
-  if (optOut.exists) return res.status(409).json({ message: "This number replied STOP." });
+  if (optOut.exists) return { status: 409, message: "This number replied STOP." };
   const template = (await listApprovedTemplates(t)).find((x) => x.name === name);
-  if (!template) return res.status(404).json({ message: `Template ${name} isn't approved.` });
-  const given = (req.body?.variables && typeof req.body.variables === "object" ? req.body.variables : {}) as Record<string, unknown>;
+  if (!template) return { status: 404, message: `Template ${name} isn't approved.` };
   const keys = (template.variableKeys as string[]) || [];
   const variables = Object.fromEntries(keys.map((k) => [k, safeText(given[k]).slice(0, 200) || (k === "2" ? "LearnXR team" : "there")]));
   const params = new URLSearchParams({ To: `whatsapp:${to}`, ContentSid: String(template.sid) });
@@ -3245,8 +3337,16 @@ app.post("/api/internal/whatsapp-template", async (req, res) => {
   });
   const data = (await apiRes.json().catch(() => ({}))) as Record<string, unknown>;
   await writeOpsAudit({ action: "whatsapp.template.auto", targetId: to, details: { name, status: apiRes.status, sid: data.sid || null } });
-  if (!apiRes.ok) return res.status(502).json({ message: String(data.message || "Twilio send failed") });
-  return res.json({ ok: true, sid: data.sid });
+  if (!apiRes.ok) return { status: 502, message: String(data.message || "Twilio send failed") };
+  return { status: 200, sid: data.sid };
+}
+
+app.post("/api/internal/whatsapp-template", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const given = (req.body?.variables && typeof req.body.variables === "object" ? req.body.variables : {}) as Record<string, unknown>;
+  const sent = await sendLxrTemplate(req.body?.to, req.body?.templateName, given);
+  if (sent.status !== 200) return res.status(sent.status).json({ message: sent.message });
+  return res.json({ ok: true, sid: sent.sid });
 });
 
 /** "Call now" from the dashboard. n8n's gate still decides (consent, hours, caps, mode). */
