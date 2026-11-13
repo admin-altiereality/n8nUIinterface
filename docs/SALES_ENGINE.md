@@ -149,7 +149,7 @@ adding a new row. The same Meta lead seen twice is skipped.
 
   | Schedule | Endpoint | Does |
   |---|---|---|
-  | every 30 min, Mon–Sat 10–19 | `/api/internal/sla-check` | Hot leads not called or messaged: the owner after 1 business hour, the manager after 4; once per level. |
+  | every 15 min | `/api/internal/sla-check` | Hot leads not called or messaged: the owner after 15 business minutes, the manager after 4 business hours; once per level. |
   | Monday 9:00 | `/api/internal/digest` | Weekly digest email. |
   | daily 9:30 | `/api/internal/renewal-check` | Renewal reminders 60, 30 and 7 days before. |
   | every 15 min | `/api/internal/forms-sync` | New website contact-form messages (lexrn1 `contactSubmissions`) and report-download sign-ups (product `report_leads`) go through a spam filter into Sales • Inbound as website leads; spam is logged as `form.spam`. |

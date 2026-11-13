@@ -115,7 +115,7 @@ export default function TeamPage() {
           <AlertTriangle className="h-3.5 w-3.5 text-amber-300" /> Hot leads waiting for a first call ({breaches.length})
         </h2>
         <p className="mb-3 text-[10px] text-zinc-500">
-          Counted in business hours (Mon–Sat, 10:00–19:00). The owner gets an alert after 1 hour and the manager after 4. Calling or messaging from the lead drawer
+          Counted in business hours (Mon–Sat, 10:00–19:00). The owner gets an alert after 15 minutes and the manager after 4 hours. Calling or messaging from the lead drawer
           clears it.
         </p>
         <div className="space-y-2">
