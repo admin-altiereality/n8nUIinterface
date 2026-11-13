@@ -48,7 +48,7 @@ describe('contacts', () => {
 });
 
 describe('rampCap', () => {
-  const sends = (n: number, bounced: number) => Array.from({ length: n }, (_, i) => ({ Email_sent_at: iso(NOW - DAY), Bounced_status: i < bounced ? 'true' : 'false' }));
+  const sends = (n: number, bounced: number, at = NOW) => Array.from({ length: n }, (_, i) => ({ Email_sent_at: iso(at - DAY), Bounced_status: i < bounced ? 'true' : 'false' }));
 
   it('starts at 50 and adds 25 per full week', () => {
     expect(rampCap([], NOW).cap).toBe(50);
@@ -56,7 +56,7 @@ describe('rampCap', () => {
   });
 
   it('holds at 50 from 3% bounces and stops at 5%', () => {
-    expect(rampCap(sends(100, 3), NOW + 15 * DAY)).toMatchObject({ cap: 50, bounceRate: 3 });
+    expect(rampCap(sends(100, 3, NOW + 15 * DAY), NOW + 15 * DAY)).toMatchObject({ cap: 50, bounceRate: 3 });
     expect(rampCap(sends(100, 5), NOW).cap).toBe(0);
     expect(rampCap(sends(10, 5), NOW)).toMatchObject({ cap: 50, bounceRate: null });
   });
