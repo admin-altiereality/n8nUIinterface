@@ -6,6 +6,10 @@ import SalesHomePage from './pages/SalesHomePage';
 import PipelinePage from './pages/PipelinePage';
 import RepliesPage from './pages/RepliesPage';
 import ProspectsPage from './pages/ProspectsPage';
+import OutboxPage from './pages/OutboxPage';
+import ContactsPage from './pages/ContactsPage';
+import UsagePage from './pages/UsagePage';
+import ActivityPage from './pages/ActivityPage';
 import TwilioMessagingPage from './pages/TwilioMessagingPage';
 import OpsDashboardPage from './pages/OpsDashboardPage';
 import LeadTimelinePage from './pages/LeadTimelinePage';
@@ -93,6 +97,46 @@ const App: React.FC = () => {
             <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
               <AppLayout>
                 <ProspectsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/outbox"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <OutboxPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/contacts"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <ContactsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/usage"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <UsagePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/activity"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <ActivityPage />
               </AppLayout>
             </ProtectedRoute>
           }

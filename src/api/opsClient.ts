@@ -1,4 +1,5 @@
 import { getAuthIdToken } from '../lib/firebase';
+import type { RunLogEntry } from '../lib/salesOps';
 import type { SchoolLeadRow } from './sheetsClient';
 
 function isProxyUsable(url: string | undefined): boolean {
@@ -613,4 +614,14 @@ export async function requestAiCall(leadId: string): Promise<{ ok?: boolean; que
   });
   if (!res.ok) await parseError(res, 'Could not start the call.');
   return res.json();
+}
+
+// ---- Run log (Usage & cost, Activity) ----
+
+/** Summaries Sales • Outbound posts after each city run and follow-up run. */
+export async function fetchRunLog(days = 30): Promise<RunLogEntry[]> {
+  const res = await fetchWithAuthRetry(opsUrl(`/api/sales/run-log?days=${days}`));
+  if (!res.ok) await parseError(res, 'Could not load the run log.');
+  const json = (await res.json()) as { entries?: RunLogEntry[] };
+  return Array.isArray(json.entries) ? json.entries : [];
 }
