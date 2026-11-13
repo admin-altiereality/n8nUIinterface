@@ -625,3 +625,26 @@ export async function fetchRunLog(days = 30): Promise<RunLogEntry[]> {
   const json = (await res.json()) as { entries?: RunLogEntry[] };
   return Array.isArray(json.entries) ? json.entries : [];
 }
+
+// ---- Demo bookings (cal.com) ----
+
+export type DemoBooking = {
+  uid: string;
+  status: 'booked' | 'cancelled' | 'rescheduled';
+  startTime: string;
+  endTime: string;
+  name: string;
+  email: string;
+  leadId: string;
+  meetUrl: string;
+  title: string;
+  updatedAt: string;
+};
+
+/** cal.com bookings from the last 60 days and all upcoming ones, earliest first. */
+export async function fetchBookings(): Promise<DemoBooking[]> {
+  const res = await fetchWithAuthRetry(opsUrl('/api/sales/bookings'));
+  if (!res.ok) await parseError(res, 'Could not load meetings.');
+  const json = (await res.json()) as { bookings?: DemoBooking[] };
+  return Array.isArray(json.bookings) ? json.bookings : [];
+}

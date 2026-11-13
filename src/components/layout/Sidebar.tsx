@@ -27,6 +27,7 @@ import {
   Contact,
   Receipt,
   Activity,
+  CalendarDays,
 } from 'lucide-react';
 
 interface NavItem {
@@ -47,6 +48,12 @@ const NAV_ITEMS: NavItem[] = [
     label: 'Sales Home',
     path: '/sales',
     icon: <Home className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Meetings',
+    path: '/meetings',
+    icon: <CalendarDays className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'salesperson'],
   },
   {
