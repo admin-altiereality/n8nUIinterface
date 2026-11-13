@@ -209,11 +209,18 @@ contacts, and its Outbox / Contacts / Usage / Activity views. Sending stays on n
 - **Outbound City Run** takes `segment` and `max`. Each segment has its own Places searches and junk filters; the AI
   reads the homepage plus up to 4 sub-pages, finds the head (principal, director, founder, dean) and one more named
   contact.
-- **Contact finding.** An address printed on the site is used as before (`Email_verify=site`). If the site prints none
-  of its own, the run guesses role and name addresses on the site's domain (principal@, info@, first.last@…) and checks
-  at most 2 per place, 30 per run, with **Reoon** (n8n credential "Reoon API key", power mode). Only `safe` or
-  deliverable `role_account` results are used (`verified`); a `catch_all` guess is kept only when the site printed
-  nothing and is emailed last. Unconfirmed guesses are never used. Reoon's free plan is 20 checks a day.
+- **Contact finding.** An address printed on the site is used as is (`Email_verify=site`), with no check. Reoon is
+  used only when there is real doubt: a place that would make the sheet but prints no address of its own. The run
+  guesses one address on the site's domain (principal@ or info@ first, then name patterns) and checks just that one
+  with **Reoon** (n8n credential "Reoon API key", power mode). Only `safe` or deliverable `role_account` results are
+  used (`verified`); a `catch_all` guess is kept only when the site printed nothing and is emailed last. Unconfirmed
+  or `unknown` guesses are never used.
+  - **Budget:** at most 20 checks a day across all runs (Reoon's free daily allowance), counted in Outbound's
+    static data (`reoon`, `DAILY_MAX` in Plan Email Checks); errors and unknowns don't count. Raise `DAILY_MAX` only
+    to spend paid credits on purpose.
+  - **Never blocks a run:** each run first calls Reoon's free balance check once. No key, a bad key, no credits or
+    Reoon down means every check is skipped and the run carries on; places without a confirmed address keep their
+    phone and website.
 - **Sheet columns** (CW–DB): `Segment`, `Email_verify`, `Email_source`, `Contact_2_name`, `Contact_2_role`,
   `Contact_2_email`.
 - **Cold-email ramp** (Pick Emails and Daily Send Cap): 50/day from 13 Nov 2026, +25 each full week, at most 500.
