@@ -10,6 +10,7 @@ import OutboxPage from './pages/OutboxPage';
 import ContactsPage from './pages/ContactsPage';
 import UsagePage from './pages/UsagePage';
 import ActivityPage from './pages/ActivityPage';
+import MeetingsPage from './pages/MeetingsPage';
 import TwilioMessagingPage from './pages/TwilioMessagingPage';
 import OpsDashboardPage from './pages/OpsDashboardPage';
 import LeadTimelinePage from './pages/LeadTimelinePage';
@@ -107,6 +108,16 @@ const App: React.FC = () => {
             <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
               <AppLayout>
                 <OutboxPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/meetings"
+          element={
+            <ProtectedRoute allowedRoles={['superadmin', 'associate', 'salesperson']}>
+              <AppLayout>
+                <MeetingsPage />
               </AppLayout>
             </ProtectedRoute>
           }

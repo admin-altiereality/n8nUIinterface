@@ -232,3 +232,14 @@ contacts, and its Outbox / Contacts / Usage / Activity views. Sending stays on n
 - **Pages:** Contacts `/contacts` (every person found, email status), Outbox `/outbox` (every cold email sent and its
   outcome; review after the fact, nothing waits for approval), Activity `/activity` (runs, replies, bounces, demos,
   wins), Usage & cost `/usage` (searches, site reads, email checks, sends, estimated ₹, today's cap and bounce rate).
+
+## Meetings (2026-11-13)
+
+- cal.com (`cal.com/altie-reality/30min`) posts booking created, rescheduled and cancelled events to n8n
+  **Sales • Demo Bookings** (`ngGp3koSUIL4OS88`). The webhook was added in cal.com on 13 Nov; before that no booking
+  reached the system.
+- The workflow updates the lead row when the booking link carried `metadata[leadId]`, emails the reps, and forwards
+  the raw event to `POST /api/internal/bookings` (X-Altie-Key), stored in Firestore `demoBookings` (one doc per booking
+  uid; a reschedule marks the old uid "rescheduled").
+- **Meetings `/meetings`** lists upcoming, past and cancelled demos with a Join link, matched to a lead by lead ID or
+  else by email. `GET /api/sales/bookings` returns the last 60 days and everything upcoming.

@@ -40,6 +40,7 @@ import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefau
 import { PRICING_DOC, agentPricingText, cleanPricing, pricingSheetRows, withPricingDefaults } from "./pricing";
 import { VOICE_CALLS, voiceCallFromExecution, voiceTotals, type VoiceCall } from "./voice";
 import { parseRunLog } from "./runLog";
+import { DEMO_BOOKINGS, parseBookingEvent } from "./bookings";
 
 setGlobalOptions({ maxInstances: 10 });
 
@@ -3015,6 +3016,31 @@ app.get("/api/sales/run-log", requireRoles(SALES_N8N_ROLES), async (req, res) =>
   } catch (err) {
     logger.error("run log read failed", err);
     return res.status(502).json({ message: "Could not read the run log." });
+  }
+});
+
+/** Sales • Demo Bookings forwards each cal.com booking event here (X-Altie-Key); one doc per booking uid. */
+app.post("/api/internal/bookings", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const parsed = parseBookingEvent(req.body);
+  if (parsed === null) return res.json({ ok: true, ignored: true });
+  if (typeof parsed === "string") return res.status(400).json({ message: parsed });
+  const col = getDataProjectDb().collection(DEMO_BOOKINGS);
+  await col.doc(parsed.booking.uid).set(parsed.booking, { merge: true });
+  if (parsed.replaces && parsed.replaces !== parsed.booking.uid) {
+    await col.doc(parsed.replaces).set({ uid: parsed.replaces, status: "rescheduled", updatedAt: parsed.booking.updatedAt }, { merge: true });
+  }
+  return res.json({ ok: true });
+});
+
+app.get("/api/sales/bookings", requireRoles(SALES_N8N_ROLES), async (_req, res) => {
+  const since = new Date(Date.now() - 60 * 86_400_000).toISOString();
+  try {
+    const snap = await getDataProjectDb().collection(DEMO_BOOKINGS).where("startTime", ">=", since).orderBy("startTime", "asc").limit(500).get();
+    return res.json({ bookings: snap.docs.map((d) => d.data()) });
+  } catch (err) {
+    logger.error("bookings read failed", err);
+    return res.status(502).json({ message: "Could not read bookings." });
   }
 });
 
