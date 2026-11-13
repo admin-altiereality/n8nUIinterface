@@ -23,6 +23,10 @@ import {
   PhoneCall,
   Reply,
   ListFilter,
+  Send,
+  Contact,
+  Receipt,
+  Activity,
 } from 'lucide-react';
 
 interface NavItem {
@@ -61,6 +65,30 @@ const NAV_ITEMS: NavItem[] = [
     label: 'Prospects',
     path: '/prospects',
     icon: <ListFilter className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Contacts',
+    path: '/contacts',
+    icon: <Contact className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Outbox',
+    path: '/outbox',
+    icon: <Send className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Activity',
+    path: '/activity',
+    icon: <Activity className="w-5 h-5" />,
+    roles: ['superadmin', 'associate', 'salesperson'],
+  },
+  {
+    label: 'Usage & cost',
+    path: '/usage',
+    icon: <Receipt className="w-5 h-5" />,
     roles: ['superadmin', 'associate', 'salesperson'],
   },
   {

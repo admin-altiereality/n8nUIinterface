@@ -35,10 +35,11 @@ import {
   suggestProductSchools,
   type ProductSchool,
 } from "./customers";
-import { CALL_OUTCOMES, leaderboard, slaAlert, slaBreaches, weeklyDigest } from "./team";
+import { CALL_OUTCOMES, leaderboard, overdueAlert, overdueSteps, slaAlert, slaBreaches, weeklyDigest } from "./team";
 import { SETTINGS_DOC, applySettingsPatch, changedKeys, summarizeRuns, withDefaults, type AppSettings } from "./settings";
 import { PRICING_DOC, agentPricingText, cleanPricing, pricingSheetRows, withPricingDefaults } from "./pricing";
 import { VOICE_CALLS, voiceCallFromExecution, voiceTotals, type VoiceCall } from "./voice";
+import { parseRunLog } from "./runLog";
 
 setGlobalOptions({ maxInstances: 10 });
 
@@ -164,6 +165,8 @@ const TWILIO_STATUS_RANK: Record<string, number> = {
   canceled: 100,
 };
 const ALERT_STATE_COLLECTION = "opsAlertState";
+/** One small summary per sales city run or follow-up run (Usage & cost, Activity pages). */
+const SALES_RUN_LOG = "salesRunLog";
 const OPS_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 const TWILIO_FAILURE_THRESHOLD = 5;
 
@@ -2967,6 +2970,19 @@ app.post("/api/internal/sla-check", async (req, res) => {
   return res.json({ breaches: breaches.length, newlyAlerted: alerted ? fresh.length : 0 });
 });
 
+/** n8n calls this at 10:00 and 16:00 IST, Mon–Sat: one email listing every overdue next step. */
+app.post("/api/internal/overdue-check", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const { rows } = await fetchSheetLeadRows({ limit: "5000", fresh: "1" });
+  const steps = overdueSteps(rows);
+  let sent = false;
+  if (steps.length && req.query.dry !== "1") {
+    const { title, text } = overdueAlert(steps);
+    sent = await postAlert(title, text);
+  }
+  return res.json({ overdue: steps.length, sent });
+});
+
 /** n8n calls this on Monday mornings. */
 app.post("/api/internal/digest", async (req, res) => {
   if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
@@ -2978,6 +2994,28 @@ app.post("/api/internal/digest", async (req, res) => {
   const digest = weeklyDigest(rows, audit, now);
   const sent = req.query.dry === "1" ? false : await postAlert(digest.title, digest.text);
   return res.json({ sent, ...digest });
+});
+
+/** Sales • Outbound posts a summary after each city run and each follow-up run (X-Altie-Key). */
+app.post("/api/internal/run-log", async (req, res) => {
+  if (!hasAltieKey(req)) return res.status(403).json({ message: "Forbidden" });
+  const entry = parseRunLog(req.body);
+  if (typeof entry === "string") return res.status(400).json({ message: entry });
+  // Keyed by execution id, so a retried post doesn't count a run twice.
+  await getDataProjectDb().collection(SALES_RUN_LOG).doc(`${entry.kind}-${entry.executionId}`).set(entry);
+  return res.json({ ok: true });
+});
+
+app.get("/api/sales/run-log", requireRoles(SALES_N8N_ROLES), async (req, res) => {
+  const days = Math.min(90, Math.max(1, Number.parseInt(String(req.query.days || "30"), 10) || 30));
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+  try {
+    const snap = await getDataProjectDb().collection(SALES_RUN_LOG).where("at", ">=", since).orderBy("at", "desc").limit(1000).get();
+    return res.json({ days, entries: snap.docs.map((d) => d.data()) });
+  } catch (err) {
+    logger.error("run log read failed", err);
+    return res.status(502).json({ message: "Could not read the run log." });
+  }
 });
 
 // ---- Settings and system health (Admin page) ----

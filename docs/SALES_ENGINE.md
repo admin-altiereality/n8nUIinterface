@@ -196,3 +196,32 @@ template can't be edited, so a change means a new template. The dashboard lists 
   - the opening line discloses AI + recording;
   - "stop" sets `Voice_opt_out` and `Do_not_contact`.
 - **Private material:** prompts, knowledge base and price research are in the gitignored `private/` and `reports/` folders, because this repo is public.
+
+## All-India discovery (2026-11-13)
+
+Adopted from Sellbird (formerly "Harvey", github.com/ethanplusai/sellbird): wider lead finding, guessed-and-verified
+contacts, and its Outbox / Contacts / Usage / Activity views. Sending stays on n8n + ZeptoMail.
+
+- **Sales • All-India Autopilot** (n8n `82cLy7eLBgjE1OTG`): Mon–Sat 11:30 IST, the next 2 of India's ~100 largest
+  cities (cursor in static data), 4 Outbound City Runs per city 12 minutes apart: `segment=k12|coaching|college|partner`,
+  `max=30` places read, `limit=10` first emails. A **manual** run is a safe test: one Kota coaching run, 5 places,
+  no emails.
+- **Outbound City Run** takes `segment` and `max`. Each segment has its own Places searches and junk filters; the AI
+  reads the homepage plus up to 4 sub-pages, finds the head (principal, director, founder, dean) and one more named
+  contact.
+- **Contact finding.** An address printed on the site is used as before (`Email_verify=site`). If the site prints none
+  of its own, the run guesses role and name addresses on the site's domain (principal@, info@, first.last@…) and checks
+  at most 2 per place, 30 per run, with **Reoon** (n8n credential "Reoon API key", power mode). Only `safe` or
+  deliverable `role_account` results are used (`verified`); a `catch_all` guess is kept only when the site printed
+  nothing and is emailed last. Unconfirmed guesses are never used. Reoon's free plan is 20 checks a day.
+- **Sheet columns** (CW–DB): `Segment`, `Email_verify`, `Email_source`, `Contact_2_name`, `Contact_2_role`,
+  `Contact_2_email`.
+- **Cold-email ramp** (Pick Emails and Daily Send Cap): 50/day from 13 Nov 2026, +25 each full week, at most 500.
+  If the 7-day bounce rate is 3% or more it holds at 50; at 5% or more it stops, and Bounce Brake Check emails an
+  alert. Admin → Settings daily cap 0 still stops everything. Follow-ups get max(Admin setting, 40% of the cap).
+  ZeptoMail is a transactional service, so plan a separate cold-email domain before going much past ~100/day.
+- **Run log.** Outbound posts a small summary after every city run and follow-up run to `POST /api/internal/run-log`
+  (X-Altie-Key), stored in Firestore `salesRunLog`; `GET /api/sales/run-log?days=` serves it.
+- **Pages:** Contacts `/contacts` (every person found, email status), Outbox `/outbox` (every cold email sent and its
+  outcome; review after the fact, nothing waits for approval), Activity `/activity` (runs, replies, bounces, demos,
+  wins), Usage & cost `/usage` (searches, site reads, email checks, sends, estimated ₹, today's cap and bounce rate).
