@@ -50,10 +50,10 @@ export type AppSettings = {
 export const DEFAULT_SETTINGS: AppSettings = {
   monthlyTargetInr: 0,
   channelSpendInr: { cold_email: 0, website: 0, instagram_ad: 0, facebook_ad: 0, whatsapp: 0, other: 0 },
-  dailyEmailCap: 20,
-  followUpMax: 12,
-  autoActionsMode: "test",
-  welcomeMode: "test",
+  dailyEmailCap: 50,
+  followUpMax: 25,
+  autoActionsMode: "live",
+  welcomeMode: "live",
   metaMaxDailyBudgetInr: 2000,
   alertRecipients: ["gaurav@altiereality.com"],
   replyTemplates: [],
@@ -139,8 +139,8 @@ export function withDefaults(stored: unknown): AppSettings {
     channelSpendInr: spend,
     dailyEmailCap: cap,
     followUpMax: Math.min(fu, cap),
-    autoActionsMode: s.autoActionsMode === "live" ? "live" : "test",
-    welcomeMode: s.welcomeMode === "live" ? "live" : "test",
+    autoActionsMode: s.autoActionsMode === "test" || s.autoActionsMode === "live" ? s.autoActionsMode : DEFAULT_SETTINGS.autoActionsMode,
+    welcomeMode: s.welcomeMode === "test" || s.welcomeMode === "live" ? s.welcomeMode : DEFAULT_SETTINGS.welcomeMode,
     metaMaxDailyBudgetInr:
       wholeNumber(s.metaMaxDailyBudgetInr, LIMITS.metaMaxDailyBudgetInr) ?? DEFAULT_SETTINGS.metaMaxDailyBudgetInr,
     alertRecipients:

@@ -10,9 +10,9 @@ describe('withDefaults', () => {
   it('keeps valid stored values and replaces invalid ones', () => {
     const s = withDefaults({ dailyEmailCap: 30, followUpMax: 'x', autoActionsMode: 'live', welcomeMode: 'maybe', channelSpendInr: { website: 500, bogus: 9 } });
     expect(s.dailyEmailCap).toBe(30);
-    expect(s.followUpMax).toBe(12);
+    expect(s.followUpMax).toBe(25);
     expect(s.autoActionsMode).toBe('live');
-    expect(s.welcomeMode).toBe('test');
+    expect(s.welcomeMode).toBe('live');
     expect(s.channelSpendInr.website).toBe(500);
     expect(s.channelSpendInr).not.toHaveProperty('bogus');
   });
@@ -25,7 +25,7 @@ describe('withDefaults', () => {
 describe('applySettingsPatch', () => {
   it('merges a valid partial update', () => {
     const next = applySettingsPatch(DEFAULT_SETTINGS, { monthlyTargetInr: 500000, channelSpendInr: { cold_email: 1200 } });
-    expect(next).toMatchObject({ monthlyTargetInr: 500000, dailyEmailCap: 20 });
+    expect(next).toMatchObject({ monthlyTargetInr: 500000, dailyEmailCap: 50 });
     expect(typeof next !== 'string' && next.channelSpendInr.cold_email).toBe(1200);
   });
 

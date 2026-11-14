@@ -1088,7 +1088,14 @@ app.options(/.*/, cors({
   origin: (origin, cb) => cb(null, isAllowedCorsOrigin(origin || undefined)),
 }));
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json({ limit: "256kb" }));
+app.use(
+  express.json({
+    limit: "256kb",
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -2841,7 +2848,10 @@ async function syncForm(
     } else {
       const res = await fetch(`${N8N_WEBHOOK_BASE}/learnxr-website-lead`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Altie-Key": n8nWebhookSecret.value(),
+        },
         body: JSON.stringify({
           name: f.name,
           organization: f.organization || "",
